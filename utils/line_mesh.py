@@ -35,8 +35,9 @@ class LineMesh:
             radius {float} -- radius of cylinder (default: {0.15})
         """
         self.points = np.array(points)
-        self.lines = np.array(
-            lines) if lines is not None else self.lines_from_ordered_points(self.points)
+        # self.lines = np.array(lines) if lines is not None else self.lines_from_ordered_points(self.points)
+        self.lines = np.array(lines) if lines is not None else np.array(
+            [[0, 1], [0, 2], [1, 3], [2, 3], [4, 5], [4, 6], [5, 7], [6, 7], [0, 4], [1, 5], [2, 6], [3, 7]])
         self.colors = np.array(colors)
         self.radius = radius
         self.cylinder_segments = []
@@ -91,10 +92,18 @@ class LineMesh:
         for cylinder in self.cylinder_segments:
             vis.remove_geometry(cylinder)
 
-    def transform(self, t):
-        for cylinder in self.cylinder_segments:
-            cylinder.transform(t)
-
     def translate(self, t):
         for cylinder in self.cylinder_segments:
             cylinder.translate(t)
+        self.translate_points(t)
+
+    def transform(self, t):
+        for cylinder in self.cylinder_segments:
+            cylinder.transform(t)
+        self.transform_points(t)
+
+    def translate_points(self, t):
+        self.points += np.array(t)
+
+    def transform_points(self, t):
+        self.points = self.points @ np.transpose(np.array(t)[:3, :3])
