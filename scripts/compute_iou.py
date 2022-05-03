@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import open3d as o3d
 import torch
+from matplotlib import pyplot as plt
 from pytorch3d.ops import box3d_overlap
 from tqdm import tqdm
 
@@ -121,7 +122,8 @@ def compute_iou(
         bbox_2d: List[float],
         aabb: bool,
         bbox_2d_ratio: float = 0.8,
-        pcd_th_ratio: float = 0.1):
+        pcd_th_ratio: float = 0.1,
+        mask_ratio: float = 0.8):
     try:
         image_id, object_id, anno_id = uniq_id.split('_')
         object_id = int(object_id)
@@ -139,8 +141,9 @@ def compute_iou(
         new_color_np[y1:y2, x1:x2, :] = color_np[y1:y2, x1:x2, :]
         new_depth_np[y1:y2, x1:x2] = depth_np[y1:y2, x1:x2]
         if seg_out_mask is not None:
-            new_color_np[seg_out_mask, :] = 0
-            new_depth_np[seg_out_mask] = 0.
+            if np.sum(seg_out_mask[y1:y2, x1:x2].astype(np.int64)) < (y2 - y1) * (x2 - x1) * mask_ratio:
+                new_color_np[seg_out_mask, :] = 0
+                new_depth_np[seg_out_mask] = 0.
 
         new_color = o3d.geometry.Image(np.ascontiguousarray(new_color_np).astype(np.uint8))
         new_depth = o3d.geometry.Image(np.ascontiguousarray(new_depth_np).astype(np.uint16))
@@ -194,7 +197,8 @@ def compute_average_iou(
         aabb: bool,
         use_seg_out_mask: bool,
         bbox_2d_ratio: float,
-        pcd_th_ratio: float):
+        pcd_th_ratio: float,
+        mask_ratio: float):
     scene_by_image_id = fetch_scene_object_by_image_id('v2_3d')
     intrinsic_fetcher = IntrinsicFetcher()
     pred_bbox_by_image_id = fetch_predicted_bbox_by_image_id()
@@ -217,16 +221,16 @@ def compute_average_iou(
         for uniq_id, bbox in pred_items:
             items.append((uniq_id, scene, fx, fy, cx, cy, height, width,
                           color_raw, depth_raw, seg_out_mask, bbox,
-                          aabb, bbox_2d_ratio, pcd_th_ratio))
+                          aabb, bbox_2d_ratio, pcd_th_ratio, mask_ratio))
 
-    pool = Pool(8)
+    pool = Pool(12)
     result_list_tqdm = []
     for result in tqdm(pool.imap_unordered(func, items), total=len(items)):
         result_list_tqdm.append(result)
     iou_by_uniq_id = {k: v for k, v in result_list_tqdm}
 
-    filename = 'aabb={},seg_out={},bbox_ratio={},pcd_th={}.json'.format(
-        aabb, use_seg_out_mask, bbox_2d_ratio, pcd_th_ratio)
+    filename = 'aabb={},seg_out={},bbox_ratio={},pcd_th={},mask_ratio={}.json'.format(
+        aabb, use_seg_out_mask, bbox_2d_ratio, pcd_th_ratio, mask_ratio)
     with open('/home/junha/data/sunrefer/iou/{}'.format(filename), 'w') as file:
         json.dump(iou_by_uniq_id, file, indent=4)
 
@@ -250,13 +254,15 @@ class PredictionVisualizer:
                  apply_seg_out_mask: bool,
                  verbose: bool = False,
                  bbox_2d_ratio: float = 0.8,
-                 pcd_th_ratio: float = 0.1):
+                 pcd_th_ratio: float = 0.1,
+                 mask_ratio: float = 0.8):
         self.aabb = aabb
         self.highlight = highlight
         self.apply_seg_out_mask = apply_seg_out_mask
         self.verbose = verbose
         self.bbox_2d_ratio = bbox_2d_ratio
         self.pcd_th_ratio = pcd_th_ratio
+        self.mask_ratio = mask_ratio
 
         self.scene_by_image_id = fetch_scene_object_by_image_id('v2_3d')
         self.intrinsic_fetcher = IntrinsicFetcher()
@@ -305,8 +311,9 @@ class PredictionVisualizer:
 
             if self.apply_seg_out_mask:
                 seg_out_mask = self.fetch_seg_out_mask(image_id)
-                new_color_np[seg_out_mask, :] = 0
-                new_depth_np[seg_out_mask] = 0.
+                if np.sum(seg_out_mask[y1:y2, x1:x2].astype(np.int64)) < (y2 - y1) * (x2 - x1) * self.mask_ratio:
+                    new_color_np[seg_out_mask, :] = 0
+                    new_depth_np[seg_out_mask] = 0.
 
             new_color = o3d.geometry.Image(np.ascontiguousarray(new_color_np).astype(np.uint8))
             new_depth = o3d.geometry.Image(np.ascontiguousarray(new_depth_np).astype(np.uint16))
@@ -390,7 +397,7 @@ class PredictionVisualizer:
                     o3d_obj_list += line_mesh.cylinder_segments
                     if oid == object_id:
                         target_mesh = line_mesh
-                    o3d.visualization.draw_geometries(o3d_obj_list)
+                o3d.visualization.draw_geometries(o3d_obj_list)
             else:
                 bbox_3d = scene.gt_3d_bbox[object_id]
                 centroid = bbox_3d.centroid[0]  # (3, )
@@ -400,6 +407,9 @@ class PredictionVisualizer:
                 target_mesh.transform(iTyz)
                 target_mesh.transform(tr_flip)
 
+            print(target_mesh.points)
+            print(bbox_mesh.points)
+
             overlap_volume, iou = line_mesh_iou(bbox_mesh, target_mesh)
             return iou.item()
         except:
@@ -408,7 +418,17 @@ class PredictionVisualizer:
 
 
 if __name__ == '__main__':
-    compute_average_iou(aabb=True,
-                        use_seg_out_mask=True,
-                        bbox_2d_ratio=1.0,
-                        pcd_th_ratio=0.1)
+    vis = PredictionVisualizer(
+        aabb=True,
+        highlight=True,
+        apply_seg_out_mask=True,
+        verbose=True,
+        bbox_2d_ratio=1.0,
+        pcd_th_ratio=0.1,
+        mask_ratio=0.8)
+    print(vis.compute_3d_bbox_by_image_id('000001', 0))
+    # compute_average_iou(aabb=True,
+    #                     use_seg_out_mask=True,
+    #                     bbox_2d_ratio=1.0,
+    #                     pcd_th_ratio=0.1,
+    #                     mask_ratio=0.8)
