@@ -54,6 +54,18 @@ def fetch_seg_dir() -> Path:
     return _ensure_file_exists('seg')
 
 
+def fetch_segformer_dir() -> Path:
+    """
+    Returns a directory contains segformer segmentation masks.
+    :return: a Path object to the segformer directory.
+    """
+    return _ensure_file_exists('segformer')
+
+
+def fetch_segformer_path(image_id: str) -> Path:
+    return _ensure_exists(fetch_segformer_dir() / '{}.npy'.format(image_id))
+
+
 def fetch_sunrefer_anno_path() -> Path:
     return _ensure_file_exists('SUNREFER_v2_revised.json')
 

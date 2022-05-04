@@ -11,6 +11,7 @@ from matplotlib import pyplot as plt
 from pytorch3d.ops import box3d_overlap
 from tqdm import tqdm
 
+from utils.directory import fetch_segformer_path, fetch_xyzrgb_pcd_path, fetch_xyzrgb_bbox_path
 from utils.intrinsic_fetcher import IntrinsicFetcher
 from utils.line_mesh import LineMesh
 from utils.meta_io import fetch_scene_object_by_image_id
@@ -222,7 +223,6 @@ def compute_average_iou(
     scene_by_image_id = fetch_scene_object_by_image_id('v2_3d')
     intrinsic_fetcher = IntrinsicFetcher()
     pred_bbox_by_image_id = fetch_predicted_bbox_by_image_id()
-    seg_out_dir = Path('/home/junha/Downloads/segformer')
 
     # Prepare items.
     items = []
@@ -232,7 +232,7 @@ def compute_average_iou(
         color_raw = cv2.imread(str(scene.rgb_path), cv2.IMREAD_COLOR)
         depth_raw = cv2.imread(str(scene.depth_path), cv2.IMREAD_UNCHANGED)
         if use_seg_out_mask:
-            seg_out = np.load(str(seg_out_dir / '{}.npy'.format(image_id)))
+            seg_out = np.load(str(fetch_segformer_path(image_id)))
             seg_out_mask = np.zeros(seg_out.shape, dtype=bool)
             for label in [0, 3, 5]:
                 seg_out_mask[seg_out == label] = True
@@ -291,7 +291,7 @@ class PredictionVisualizer:
         self.exception_label_indices = [0, 3, 5]
 
     def fetch_seg_out_mask(self, image_id: str):
-        seg_out = np.load(str(self.seg_out_dir / '{}.npy'.format(image_id)))
+        seg_out = np.load(str(fetch_segformer_path(image_id)))
         seg_out_mask = np.zeros(seg_out.shape, dtype=bool)
         for label in self.exception_label_indices:
             seg_out_mask[seg_out == label] = True
@@ -608,9 +608,9 @@ def create_xyzrgb_and_aabb():
     for i in tqdm(range(1, 10336)):
         image_id = '{:06d}'.format(i)
         xyzrgb, aabb_list = vis.extract_rgbxyz_pcd_by_image_id(image_id)
-        np.save('/home/junha/data/sunrefer/xyzrgb/{}.npy'.format(image_id), xyzrgb)
+        np.save(str(fetch_xyzrgb_pcd_path(image_id)), xyzrgb)
         aabb_by_image_id[image_id] = aabb_list
-    with open('/home/junha/data/sunrefer/xyzrgb/aabb.json', 'w') as file:
+    with open(str(fetch_xyzrgb_bbox_path()), 'w') as file:
         json.dump(aabb_by_image_id, file, indent=4)
 
 
