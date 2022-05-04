@@ -25,6 +25,23 @@ def _ensure_file_exists(filename: str) -> Path:
     return _ensure_exists(fetch_data_root_dir() / filename)
 
 
+def fetch_xyzrgb_dir() -> Path:
+    """
+    Returns a directory contains an extrinsic transformed pointcloud (x, y, z, rx, ry, r, g, b)
+    in a shape of the image (W, H, 8).
+    :return: a Path object to the xyzrgb directory.
+    """
+    return _ensure_file_exists('xyzrgb')
+
+
+def fetch_xyzrgb_pcd_path(image_id: str) -> Path:
+    return _ensure_exists(fetch_xyzrgb_dir() / '{}.npy'.format(image_id))
+
+
+def fetch_xyzrgb_bbox_path() -> Path:
+    return _ensure_exists(fetch_xyzrgb_dir() / 'aabb.json')
+
+
 def fetch_rgb_dir() -> Path:
     return _ensure_file_exists('rgb')
 
