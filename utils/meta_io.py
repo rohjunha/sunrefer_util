@@ -1,4 +1,6 @@
+from collections import defaultdict
 from pathlib import Path
+from typing import Dict, Tuple, List
 
 import cv2
 import numpy as np
@@ -12,11 +14,19 @@ class BoundingBox3DV1:
         self.basis, self.coeffs, self.centroid, _class_name, _, _, self.orientation, _, _ = info
         self.class_name = _class_name[0]
 
+    def __repr__(self):
+        return 'BoundingBox3DV1 - class_name: {}, basis: {}, coeffs: {}, centroid: {}, orientation: {}'.format(
+            self.class_name, self.basis, self.coeffs, self.centroid, self.orientation)
+
 
 class BoundingBox3DV2:
     def __init__(self, info):
         self.basis, self.coeffs, self.centroid, _class_name, _, self.orientation, label = info
         self.class_name = _class_name[0]
+
+    def __repr__(self):
+        return 'BoundingBox3DV2 - class_name: {}, basis: {}, coeffs: {}, centroid: {}, orientation: {}'.format(
+            self.class_name, self.basis, self.coeffs, self.centroid, self.orientation)
 
 
 class BoundingBox2DV2:
@@ -27,6 +37,10 @@ class BoundingBox2DV2:
         self.has_3d_bbox = bool(_has_3d_bbox[0][0])
         self.gt_bbox_2d = _gt_bbox_2d[0, :].astype(np.int64).tolist()
 
+    def __repr__(self):
+        return 'BoundingBox2DV2 - object_id: {}, class_name: {}, has_3d_bbox: {}, gt_bbox_2d: {}'.format(
+            self.object_id, self.class_name, self.has_3d_bbox, self.gt_bbox_2d)
+
 
 class MetaObjectBase:
     def __init__(self, seq_name: str, rgb_name: str, depth_name: str):
@@ -36,6 +50,9 @@ class MetaObjectBase:
         assert self.rgb_path.exists()
         assert self.depth_path.exists()
         assert self.seg_path.exists()
+
+    def __repr__(self):
+        return 'seq_name: {}'.format(self.seq_root.stem)
 
     @property
     def depth_path(self) -> Path:
@@ -96,6 +113,10 @@ class MetaObject2DV2(MetaObjectBase):
         MetaObjectBase.__init__(self, str(seq_name[0]), str(rgb_name[0]), str(depth_name[0]))
         self.gt_2d_bbox = [BoundingBox2DV2(gt_2d_bbox[0, i]) for i in range(gt_2d_bbox.shape[1])]
 
+    def __repr__(self):
+        return 'MetaObject2DV2 - {}, gt_2d_bbox: [{}]'.format(
+            MetaObjectBase.__repr__(self), ', '.join([str(b) for b in self.gt_2d_bbox]))
+
     def draw_bbox(self, object_id: str):
         image = cv2.cvtColor(cv2.imread(str(self.rgb_path)), cv2.COLOR_BGR2RGB)
         bbox = self.gt_2d_bbox[int(object_id)]
@@ -107,6 +128,12 @@ class MetaObject2DV2(MetaObjectBase):
         for bbox in self.gt_2d_bbox:
             draw_bbox_and_text(image, bbox)
         return image
+
+    def build_class_dict(self) -> Dict[str, List[BoundingBox2DV2]]:
+        class_dict = defaultdict(list)
+        for i, bbox in enumerate(self.gt_2d_bbox):
+            class_dict[bbox.class_name].append(bbox)
+        return class_dict
 
 
 class MetaObject3DV2(MetaObjectBase):
@@ -120,6 +147,11 @@ class MetaObject3DV2(MetaObjectBase):
         self.sensor_type = sensor_type
         self.extrinsics = anno_extrinsics
 
+    def __repr__(self):
+        return 'MetaObject3DV2 - {}, valid: {}, sensor_type: {}, extrinsics: {}, gt_3d_bbox: [{}]'.format(
+            MetaObjectBase.__repr__(self), self.valid, self.sensor_type, self.extrinsics,
+            ', '.join([str(b) for b in self.gt_3d_bbox]))
+
 
 class MetaObjectV1(MetaObjectBase):
     def __init__(self, item):
@@ -129,6 +161,12 @@ class MetaObjectV1(MetaObjectBase):
         self.gt_corner_3d = gt_corner_3d  # float64, (14, )
         self.gt_2d_bbox = [gt_2d_bbox[0, i][0] for i in range(gt_2d_bbox.shape[1])]
         self.gt_3d_bbox = [BoundingBox3DV1(gt_3d_bbox[0, i]) for i in range(gt_3d_bbox.shape[1])]
+
+    def __repr__(self):
+        return 'MetaObjectV1 - {}, valid: {}, gt_corner_3d: {}, gt_2d_bbox: [{}], gt_3d_bbox: [{}]'.format(
+            MetaObjectBase.__repr__(self), self.valid, self.gt_corner_3d,
+            ', '.join([str(b) for b in self.gt_2d_bbox]),
+            ', '.join([str(b) for b in self.gt_3d_bbox]))
 
     def create_binary_segmentation(self, object_id: str):
         seg_data = scipy.io.loadmat(str(self.seg_path))

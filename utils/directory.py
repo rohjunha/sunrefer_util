@@ -66,6 +66,10 @@ def fetch_segformer_path(image_id: str) -> Path:
     return _ensure_exists(fetch_segformer_dir() / '{}.npy'.format(image_id))
 
 
+def fetch_object_2d_3d_path() -> Path:
+    return _ensure_file_exists('object_2d_3d.json')
+
+
 def fetch_sunrefer_anno_path() -> Path:
     return _ensure_file_exists('SUNREFER_v2_revised.json')
 

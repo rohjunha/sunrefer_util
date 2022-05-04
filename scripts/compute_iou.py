@@ -1,7 +1,7 @@
 import json
 from multiprocessing import Pool
 from pathlib import Path
-from typing import List, Union, Tuple
+from typing import List, Union, Tuple, Dict
 
 import cv2
 import numpy as np
@@ -9,12 +9,14 @@ import open3d as o3d
 import torch
 from matplotlib import pyplot as plt
 from pytorch3d.ops import box3d_overlap
+from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from utils.directory import fetch_segformer_path, fetch_xyzrgb_pcd_path, fetch_xyzrgb_bbox_path
+from utils.directory import fetch_segformer_path, fetch_xyzrgb_pcd_path, fetch_xyzrgb_bbox_path, fetch_split_test_path, \
+    fetch_split_train_path, fetch_object_2d_3d_path
 from utils.intrinsic_fetcher import IntrinsicFetcher
 from utils.line_mesh import LineMesh
-from utils.meta_io import fetch_scene_object_by_image_id
+from utils.meta_io import fetch_scene_object_by_image_id, MetaObject2DV2, MetaObject3DV2
 from utils.pred_and_anno import fetch_predicted_bbox_by_image_id
 
 
@@ -628,7 +630,6 @@ def visualize_annotation(image_id: str, anno_idx: int):
 
 if __name__ == '__main__':
     visualize_annotation('000001', 0)
-
     # compute_average_iou(aabb=True,
     #                     use_seg_out_mask=True,
     #                     bbox_2d_ratio=1.0,
