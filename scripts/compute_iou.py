@@ -363,6 +363,7 @@ class PredictionVisualizer:
             o3d_obj_list = []
             coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.6, origin=[0, 0, 0])
             o3d_obj_list.append(coord_frame)
+            o3d_obj_list.append(new_pcd)
 
         aabb_bbox_list = []
         for oid, bbox_3d in enumerate(scene.gt_3d_bbox):
@@ -628,8 +629,24 @@ def visualize_annotation(image_id: str, anno_idx: int):
     vis.compute_3d_bbox_by_image_id(image_id, anno_idx)
 
 
+
+def test():
+    vis = PredictionVisualizer(
+        aabb=True,
+        highlight=True,
+        apply_seg_out_mask=True,
+        verbose=True,
+        bbox_2d_ratio=1.0,
+        pcd_th_ratio=0.1,
+        mask_ratio=0.8)
+
+    image_id = '000001'
+    xyzrgb, aabb_list = vis.extract_rgbxyz_pcd_by_image_id(image_id)
+
+
 if __name__ == '__main__':
-    visualize_annotation('000001', 0)
+    test()
+    # visualize_annotation('000001', 0)
     # compute_average_iou(aabb=True,
     #                     use_seg_out_mask=True,
     #                     bbox_2d_ratio=1.0,
