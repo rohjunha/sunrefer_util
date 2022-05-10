@@ -303,19 +303,19 @@ class PredictionVisualizer:
         uniq_id, bbox_2d = self.pred_bbox_by_image_id[image_id][anno_index]
         return self.compute_3d_bbox(uniq_id, bbox_2d)
 
-    def extract_rgbxyz_pcd_by_image_id(self, image_id: str):
-        return self.extract_rgbxyz_pcd(image_id)
-
     def extract_rgbxyz_pcd(self, image_id: str):
         scene = self.scene_by_image_id[image_id]
         fx, fy, cx, cy, height, width = self.intrinsic_fetcher[image_id]
 
-        Rt = np.eye(4, dtype=np.float32)
-        Rt[:3, :3] = scene.extrinsics
-
-        Tyz = np.array([[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]], dtype=np.float32)
+        Tyz = np.array([
+            [1, 0, 0, 0],
+            [0, 0, 1, 0],
+            [0, -1, 0, 0],
+            [0, 0, 0, 1]], dtype=np.float32)
         iTyz = np.linalg.inv(Tyz)
-        tr_flip = [[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]]
+        # print(iTyz)
+        # Tyz: (x, y, z) -> (x, z, -y)
+        # iTyz: (x, y, z) -> (x, -z, y)
 
         color_raw = cv2.imread(str(scene.rgb_path), cv2.IMREAD_COLOR)
         depth_raw = cv2.imread(str(scene.depth_path), cv2.IMREAD_UNCHANGED)
@@ -341,6 +341,7 @@ class PredictionVisualizer:
             xx = (xx - cx) * zz / fx
             yy = (yy - cy) * zz / fy
             pcd = np.stack((xx, yy, zz), axis=-1) @ np.transpose(extrinsics)
+            # pcd = pcd @ np.transpose(Tyz[:3, :3])
             return pcd, m, rx, ry
 
         def normalize_rgb(raw_rgb):
@@ -353,15 +354,60 @@ class PredictionVisualizer:
         pcd, m, rx, ry = convert_pcd(raw_depth=depth_np, extrinsics=scene.extrinsics)
         rgb = normalize_rgb(raw_rgb=color_np)
         xyzrgb = np.concatenate((pcd, rx[..., np.newaxis], ry[..., np.newaxis], rgb), axis=-1)
-        xyzrgb[..., 1] *= -1.
-        xyzrgb[..., 2] *= -1.
+        # xyzrgb[..., 1] *= -1.
+        # xyzrgb[..., 2] *= -1.
+
+
+        new_xyz = xyzrgb[m, :]
+        from scipy import interpolate
+
+        new_rgb = np.zeros((height * 2, width * 2, 3), dtype=np.uint8)
+        xl, yl, rl, gl, bl = [], [], [], [], []
+        for i in range(new_xyz.shape[0]):
+            X, Y, Z = new_xyz[i, 0], new_xyz[i, 1], new_xyz[i, 2]
+            R, G, B = new_xyz[i, 5], new_xyz[i, 6], new_xyz[i, 7]
+            xx = X / Z * fx + cx
+            yy = Y / Z * fy + cy
+            if 0 <= xx < width * 2 and 0 <= yy < height * 2:
+                rr = int((R * 0.229 + 0.485) * 255)
+                gg = int((G * 0.224 + 0.456) * 255)
+                bb = int((B * 0.225 + 0.406) * 255)
+                new_rgb[int(yy), int(xx), :] = rr, gg, bb
+        #     xl.append(xx)
+        #     yl.append(yy)
+        #     rl.append(rr)
+        #     gl.append(gg)
+        #     bl.append(bb)
+        # fr = interpolate.interp2d(xl, yl, rl)
+        # fg = interpolate.interp2d(xl, yl, gl)
+        # fb = interpolate.interp2d(xl, yl, bl)
+
+
+        # rx = np.linspace(0., width - 1, width)
+        # ry = np.linspace(0., height - 1, height)
+        # # xx, yy = np.meshgrid(rx, ry)
+        # # xx = xx.reshape(-1)
+        # # yy = yy.reshape(-1)
+        # rnew = (fr(rx, ry) * 255).astype(np.uint8)
+        # # gnew = (fg(rx, ry) * 255).astype(np.uint8)
+        # # bnew = (fb(rx, ry) * 255).astype(np.uint8)
+        # print(rnew.shape, rnew.dtype)
+        # new_rgb[..., 0] = rnew
+        # new_rgb[..., 1] = gnew
+        # new_rgb[..., 2] = bnew
+        plt.imshow(new_rgb)
+        plt.show()
 
         new_pcd = o3d.geometry.PointCloud()
         new_pcd.points = o3d.utility.Vector3dVector(xyzrgb[..., :3][m, :])
 
+        tiE = np.eye(4, dtype=np.float32)
+        tiE[:3, :3] = np.linalg.inv(scene.extrinsics)
         if self.verbose:
             o3d_obj_list = []
             coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.6, origin=[0, 0, 0])
+            coord_frame.transform(iTyz)
+            # coord_frame.transform(tiE)
             o3d_obj_list.append(coord_frame)
             o3d_obj_list.append(new_pcd)
 
@@ -369,19 +415,30 @@ class PredictionVisualizer:
         for oid, bbox_3d in enumerate(scene.gt_3d_bbox):
             class_name = bbox_3d.class_name  # str
             centroid = bbox_3d.centroid[0]  # (3, )
-            basis = bbox_3d.basis  # (3, 3)
+            basis = bbox_3d.basis
+            # basis = np.transpose(scene.extrinsics) @ bbox_3d.basis  # (3, 3)
+            # basis = np.transpose(scene.extrinsics) @ bbox_3d.basis
+            # print(bbox_3d.basis)
+            # print(basis)
+            # print()
             coeffs = bbox_3d.coeffs[0]  # (3, )
             line_mesh = create_line_mesh(centroid, basis, coeffs, aabb=self.aabb)
             line_mesh.transform(iTyz)
-            line_mesh.transform(tr_flip)
-            bbox_points = np.array(line_mesh.points)
-            p1 = np.min(bbox_points, axis=0)
-            p2 = np.max(bbox_points, axis=0)
-            bbox_points = np.concatenate(((p1 + p2) / 2., p2 - p1), axis=0)
+            # line_mesh.transform(tiE)
+            # line_mesh.transform(tiE)
+            # line_mesh.transform(tr_flip)
             if self.verbose:
-                line_mesh2 = create_line_mesh_from_center_size(bbox_points)
-                o3d_obj_list += line_mesh2.cylinder_segments
-            aabb_bbox_list.append((class_name, bbox_points.tolist()))
+                o3d_obj_list += line_mesh.cylinder_segments
+
+            # # Testing center, size representation.
+            # bbox_points = np.array(line_mesh.points)
+            # p1 = np.min(bbox_points, axis=0)
+            # p2 = np.max(bbox_points, axis=0)
+            # bbox_points = np.concatenate(((p1 + p2) / 2., p2 - p1), axis=0)
+            # if self.verbose:
+            #     line_mesh2 = create_line_mesh_from_center_size(bbox_points)
+            #     o3d_obj_list += line_mesh2.cylinder_segments
+            # aabb_bbox_list.append((class_name, bbox_points.tolist()))
 
         if self.verbose:
             o3d.visualization.draw_geometries(o3d_obj_list)
@@ -610,7 +667,7 @@ def create_xyzrgb_and_aabb():
     aabb_by_image_id = dict()
     for i in tqdm(range(1, 10336)):
         image_id = '{:06d}'.format(i)
-        xyzrgb, aabb_list = vis.extract_rgbxyz_pcd_by_image_id(image_id)
+        xyzrgb, aabb_list = vis.extract_rgbxyz_pcd(image_id)
         np.save(str(fetch_xyzrgb_pcd_path(image_id)), xyzrgb)
         aabb_by_image_id[image_id] = aabb_list
     with open(str(fetch_xyzrgb_bbox_path()), 'w') as file:
@@ -632,7 +689,7 @@ def visualize_annotation(image_id: str, anno_idx: int):
 
 def test():
     vis = PredictionVisualizer(
-        aabb=True,
+        aabb=False,
         highlight=True,
         apply_seg_out_mask=True,
         verbose=True,
@@ -640,13 +697,13 @@ def test():
         pcd_th_ratio=0.1,
         mask_ratio=0.8)
 
-    image_id = '000001'
-    xyzrgb, aabb_list = vis.extract_rgbxyz_pcd_by_image_id(image_id)
+    image_id = '002920'
+    xyzrgb, aabb_list = vis.extract_rgbxyz_pcd(image_id)
 
 
 if __name__ == '__main__':
-    test()
-    # visualize_annotation('000001', 0)
+    # test()
+    visualize_annotation('000001', 0)
     # compute_average_iou(aabb=True,
     #                     use_seg_out_mask=True,
     #                     bbox_2d_ratio=1.0,
