@@ -38,6 +38,10 @@ def fetch_xyzrgb_pcd_path(image_id: str) -> Path:
     return _ensure_exists(fetch_xyzrgb_dir() / '{}.npy'.format(image_id))
 
 
+def fetch_xyzrgb_mask_path(image_id: str) -> Path:
+    return _ensure_exists(fetch_xyzrgb_dir() / 'mask{}.npy'.format(image_id))
+
+
 def fetch_xyzrgb_bbox_path() -> Path:
     return _ensure_exists(fetch_xyzrgb_dir() / 'aabb.json')
 

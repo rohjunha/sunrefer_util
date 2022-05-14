@@ -1,9 +1,9 @@
 import json
 import math
-from itertools import chain
+from collections import defaultdict
 from multiprocessing import Pool
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 
 import cv2
 import matplotlib.patches as mpatches
@@ -13,11 +13,13 @@ import open3d as o3d
 import scipy.io
 import torch
 from PIL import Image
-from torch.utils.data import Dataset
 from tqdm import tqdm
 
+from scripts.create_3d_bbox_dataset import verify_single_meta_file
 from utils.directory import fetch_sunrefer_anno_path, fetch_xyzrgb_bbox_path, fetch_xyzrgb_pcd_path, \
-    fetch_split_train_path, fetch_split_test_path, fetch_object_2d_3d_path, fetch_segformer_path
+    fetch_split_train_path, fetch_split_test_path, fetch_segformer_path, fetch_intrinsic_tag_by_image_id_path, \
+    fetch_intrinsic_from_tag_path, fetch_official_sunrgbd_dir, fetch_xyzrgb_mask_path
+from utils.intrinsic_fetcher import IntrinsicFetcher
 from utils.meta_io import fetch_scene_object_by_image_id, MetaObject2DV2
 from utils.pred_and_anno import fetch_predicted_bbox_by_image_id
 
@@ -125,91 +127,6 @@ def detect_wall_and_floor(image_id: str):
         ax.set_title('SUN depth image')
         plt.imshow(depth)
         plt.show()
-
-
-def build_single_meta_file():
-    # scene2d_by_image_id = fetch_scene_object_by_image_id('v2_2d')
-    # torch.save(scene2d_by_image_id, '/home/junha/Downloads/scene2d.pt')
-    # scene3d_by_image_id = fetch_scene_object_by_image_id('v2_3d')
-    # torch.save(scene3d_by_image_id, '/home/junha/Downloads/scene3d.pt')
-    # return
-
-    scene2d_by_image_id: Dict[str, MetaObject2DV2] = torch.load('/home/junha/Downloads/scene2d.pt')
-    bbox3d_by_image_id: Dict[str, List[Tuple[str, List[float]]]] = json.load(open(str(fetch_xyzrgb_bbox_path()), 'r'))
-    res = dict()
-    for image_id, scene2d in list(scene2d_by_image_id.items()):
-        bbox3d_list = bbox3d_by_image_id[image_id]
-        class_dict = scene2d.build_class_dict()
-
-        object_2d_and_3d_list = []
-        examine_3d_list = []
-        for i, bbox3d in enumerate(bbox3d_list):
-            class_name, coordinates_3d = bbox3d
-            if class_name not in class_dict:
-                print('{}::invalid 3d bbox: {}, {}'.format(image_id, i, class_name))
-                # print(list(map(lambda x: x.class_name, scene2d.gt_2d_bbox)))
-                continue
-            if len(class_dict[class_name]) > 1:
-                examine_3d_list.append((i, bbox3d))
-            else:
-                bbox2d = class_dict[class_name][0]
-                object_2d_and_3d_list.append((class_name, bbox2d.object_id, bbox2d.gt_bbox_2d, i, coordinates_3d))
-
-        if examine_3d_list:
-            xyzrgb_pcd = np.load(str(fetch_xyzrgb_pcd_path(image_id)))
-            for i, bbox3d in examine_3d_list:
-                class_name, coordinates_3d = bbox3d
-                bbox2d_list = class_dict[class_name]
-                dist_bbox_list = []
-                for bbox2d in bbox2d_list:
-                    x, y, w, h = bbox2d.gt_bbox_2d
-                    xyz = xyzrgb_pcd[y:y + h, x:x + w, :3]
-                    mask = np.logical_and(
-                        np.logical_and(np.abs(xyz[:, :, 0]) < 1e-5,
-                                       np.abs(xyz[:, :, 1]) < 1e-5),
-                        np.abs(xyz[:, :, 2]) < 1e-5)
-                    effective_xyz = xyz[~mask, :]
-                    num_points = effective_xyz.shape[0]
-                    if num_points < 10:
-                        continue
-                    sampled_xyz = effective_xyz[np.random.choice(num_points, 1000), :]
-                    centroid = np.mean(sampled_xyz, axis=0)
-                    dist = np.linalg.norm(centroid - coordinates_3d[:3])
-                    dist_bbox_list.append((dist, bbox2d))
-                dist_bbox_list = sorted(dist_bbox_list, key=lambda x: x[0])
-                if not dist_bbox_list:
-                    continue
-                dist, bbox2d = dist_bbox_list[0]
-                if dist > 1.:
-                    print('{}::too far from the gt center: {}'.format(image_id, dist))
-                else:
-                    object_2d_and_3d_list.append((class_name, bbox2d.object_id, bbox2d.gt_bbox_2d, i, coordinates_3d))
-
-        object_2d_and_3d_list = sorted(object_2d_and_3d_list, key=lambda x: x[1])
-        res[image_id] = object_2d_and_3d_list
-
-    with open('/home/junha/Downloads/object_2d_3d.json', 'w') as file:
-        json.dump(res, file, indent=4)
-
-
-def verify_single_meta_file():
-    with open('/home/junha/Downloads/object_2d_3d.json', 'r') as file:
-        object_2d_3d = json.load(file)
-    for image_id, items in list(object_2d_3d.items())[:10]:
-        print(image_id)
-        xyz = np.load(str(fetch_xyzrgb_pcd_path(image_id)))
-        print(items)
-        for class_name, obj_id_2d, bbox_2d, obj_id_3d, bbox_3d in items:
-            x, y, w, h = bbox_2d
-            mask = np.logical_or(np.logical_or(np.abs(xyz[:, :, 0]) > 1e-5, np.abs(xyz[:, :, 1]) > 1e-5),
-                                 np.abs(xyz[:, :, 2]) > 1e-5)
-            mask_crop = mask[y:y + h, x:x + w]
-            dx = xyz[y:y + h, x:x + w, 3][mask_crop] * xyz.shape[1]
-            dy = xyz[y:y + h, x:x + w, 4][mask_crop] * xyz.shape[0]
-            in_dx = np.logical_and(dx >= x, dx <= x + w)
-            in_dy = np.logical_and(dy >= y, dy <= y + h)
-            in_dxdy = np.logical_and(in_dx, in_dy)
-            print(class_name, 'inlier rate: {:5.3f}'.format(np.sum(in_dxdy) / in_dx.shape[0] * 100))
 
 
 def compute_volume(x1, x2, y1, y2, z1, z2):
@@ -459,6 +376,209 @@ def project_3d_to_2d_bbox():
     # y = Y / Z * fy + cy
 
 
+INTRINSIC_BY_TAG = {
+    "k0": [518.857901, 519.469611, 284.582449, 208.736166, 427, 561],
+    "k1": [520.532, 520.7444, 277.9258, 215.115, 427, 561],
+    "k2": [529.5, 529.5, 365.0, 265.0, 530, 730],
+    "x0": [570.342224, 570.342224, 310.0, 225.0, 441, 591],
+    "x1": [533.069214, 533.069214, 310.0, 225.0, 441, 591],
+    "x2": [570.342224, 570.342224, 291.0, 231.0, 441, 591],
+    "r0": [691.584229, 691.584229, 362.777557, 264.75, 531, 681],
+    "r1": [693.74469, 693.74469, 360.431915, 264.75, 531, 681]}
+
+
+class SceneInformation:
+    def __init__(self, item_dict: Dict[str, Any]):
+        self.fx, self.fy, self.tx, self.ty, self.height, self.width = INTRINSIC_BY_TAG[item_dict['intrinsic']]
+        self._item_dict = item_dict
+        self.seq_name = item_dict['seq_name']
+        self.rgb_name = item_dict['rgb_name']
+        self.depth_name = item_dict['depth_name']
+        self.E = item_dict['E']
+        self.obj_3d_list = item_dict['obj_3d']
+        self.obj_2d_list = item_dict['obj_2d']
+
+    @property
+    def seq_dir(self):
+        return fetch_official_sunrgbd_dir() / self.seq_name
+
+    @property
+    def depth_path(self) -> Path:
+        if self.seq_dir is not None and self.depth_name is not None:
+            return self.seq_dir / 'depth' / self.depth_name
+        else:
+            return Path()
+
+    @property
+    def rgb_path(self) -> Path:
+        if self.seq_dir is not None and self.rgb_name is not None:
+            return self.seq_dir / 'image' / self.rgb_name
+        else:
+            return Path()
+
+    @property
+    def seg_path(self) -> Path:
+        if self.seq_dir is not None:
+            return self.seq_dir / 'seg.mat'
+        else:
+            return Path()
+
+
+def fetch_scene_object_by_image_id() -> Dict[str, SceneInformation]:
+    converted_scene_info_path = Path('/home/junha/data/sunrefer/meta.pt')
+    if converted_scene_info_path.exists():
+        converted_scene_info_by_image_id = torch.load(str(converted_scene_info_path))
+    else:
+        scene_3d_by_image_id = fetch_scene_object_by_image_id('v2_3d')
+        scene_2d_by_image_id = fetch_scene_object_by_image_id('v2_2d')
+
+        with open(str(fetch_intrinsic_tag_by_image_id_path()), 'r') as file:
+            intrinsic_tag_by_image_id = json.load(file)
+
+        converted_scene_info_by_image_id = dict()
+        for key in tqdm(scene_3d_by_image_id.keys()):
+            scene_3d = scene_3d_by_image_id[key]
+            scene_2d = scene_2d_by_image_id[key]
+            intrinsic_tag = intrinsic_tag_by_image_id[key]
+
+            obj_3d_list = []
+            obj_2d_list = []
+
+            for object_index, bbox_3d in enumerate(scene_3d.gt_3d_bbox):
+                obj_3d_list.append({
+                    'class_name': bbox_3d.class_name,
+                    'basis': bbox_3d.basis,
+                    'coeffs': bbox_3d.coeffs,
+                    'centroid': bbox_3d.centroid,
+                    'orientation': bbox_3d.orientation})
+
+            for object_index, bbox_2d in enumerate(scene_2d.gt_2d_bbox):
+                obj_2d_list.append({
+                    'class_name': bbox_2d.class_name,
+                    'has_3d_bbox': bbox_2d.has_3d_bbox,
+                    'bbox_2d': bbox_2d.gt_bbox_2d})
+
+            converted_scene_info_by_image_id[key] = {
+                'seq_name': scene_3d.seq_root.stem,
+                'rgb_name': scene_3d.rgb_name,
+                'depth_name': scene_3d.depth_name,
+                'E': scene_3d.extrinsics,
+                'intrinsic': intrinsic_tag,
+                'obj_3d': obj_3d_list,
+                'obj_2d': obj_2d_list,
+            }
+
+        torch.save(converted_scene_info_by_image_id, converted_scene_info_path)
+    return {k: SceneInformation(v) for k, v in converted_scene_info_by_image_id.items()}
+
+
+def inlier_ratio_from_pcd_and_aabb(pcd, aabb):
+    X, Y, Z, W, H, D = aabb
+    X1, X2 = X - 0.5 * W, X + 0.5 * W
+    Y1, Y2 = Y - 0.5 * H, Y + 0.5 * H
+    Z1, Z2 = Z - 0.5 * D, Z + 0.5 * D
+    inliers = (X1 <= pcd[:, 0]) & (pcd[:, 0] <= X2) & \
+              (Y1 <= pcd[:, 1]) & (pcd[:, 1] <= Y2) & \
+              (Z1 <= pcd[:, 2]) & (pcd[:, 2] <= Z2)
+    return np.sum(inliers) / pcd.shape[0]
+
+
+def compute_2d_3d_bbox_correspondences():
+    MIN_NUM_POINTS = 20
+    MIN_INLIER_RATIO = 0.2
+
+    scene_object_by_image_id = fetch_scene_object_by_image_id()
+    bbox3d_by_image_id: Dict[str, List[Tuple[str, List[float]]]] = json.load(open(str(fetch_xyzrgb_bbox_path()), 'r'))
+    obj_pair_list = []
+    for image_id, aabb_list in tqdm(list(bbox3d_by_image_id.items())):
+        pcd = np.load(str(fetch_xyzrgb_pcd_path(image_id)))  # H, W, 8
+        mask = (pcd[:, :, 0] < 1e-5) & (pcd[:, :, 1] < 1e-5) & (pcd[:, :, 2] < 1e-5)
+        scene = scene_object_by_image_id[image_id]
+
+        aabb_dict = defaultdict(list)
+        for class_name_3d, aabb in aabb_list:
+            aabb_dict[class_name_3d].append(aabb)
+
+        for obj_2d in scene.obj_2d_list:
+            class_name_2d = obj_2d['class_name']
+            has_bbox_3d = obj_2d['has_3d_bbox']
+            x, y, w, h = obj_2d['bbox_2d']
+
+            if not has_bbox_3d:
+                continue
+
+            if len(aabb_dict[class_name_2d]) > 0:
+                mask_crop = mask[y:y + h, x:x + w]
+                pcd_crop = pcd[y:y + h, x:x + w, :3]
+                pcd_crop = pcd_crop[~mask_crop, :]  # N, 3
+                num_points = pcd_crop.shape[0]
+                if num_points < MIN_NUM_POINTS:
+                    continue
+
+                sampled_xyz = pcd_crop
+                centroid = np.mean(sampled_xyz, axis=0)
+                dist_list = [np.linalg.norm(centroid - aabb[:3]) for class_name, aabb in aabb_list]
+                irl = [(inlier_ratio_from_pcd_and_aabb(sampled_xyz, aabb), aabb)
+                       for aabb in aabb_dict[class_name_2d]]
+                irl = sorted(irl, key=lambda x: x[0], reverse=True)
+                best_inlier_ratio, best_aabb = irl[0]
+                if best_inlier_ratio > MIN_INLIER_RATIO:
+                    obj_pair_list.append((image_id, class_name_2d, obj_2d['bbox_2d'], best_aabb))
+                # else:
+                #     ious, _ = zip(*irl)
+                #     print('{}, {}: could not find the aabb larger than iou of 0.2: {}'.format(
+                #         image_id, class_name_2d, list(ious)))
+            # else:
+            #     irl = [(class_name_3d, inlier_ratio_from_pcd_and_aabb(sampled_xyz, aabb))
+            #            for class_name_3d, aabb in aabb_list]
+            #     print(image_id, class_name_2d, dist_list)
+            #     print(image_id, class_name_2d, irl)
+            #     print('{} was not found from 3d'.format(class_name_2d))
+
+
+        # for class_name, aabb in aabb_list:
+        #     print(image_id, class_name, aabb)
+
+    with open('/home/junha/data/sunrefer/obj_pair_info.json', 'w') as file:
+        json.dump(obj_pair_list, file, indent=4)
+
+
+def test_2d_3d_bbox_correspondences():
+    with open('/home/junha/data/sunrefer/obj_pair_info.json', 'r') as file:
+        obj_pair_list = json.load(file)
+    print(len(obj_pair_list))
+
+    with open('/home/junha/data/sunrefer/object_2d_3d.json', 'r') as file:
+        obj_2d_3d = json.load(file)
+    print(sum(len(items) for image_id, items in obj_2d_3d.items()))
+
+
+class BoundingBoxCorrespondenceDataset:
+    def __init__(self, num_points: int):
+        with open('/home/junha/data/sunrefer/obj_pair_info.json', 'r') as file:
+            self.obj_pair_list = json.load(file)
+        self.num_points = num_points
+
+    def __len__(self):
+        return len(self.obj_pair_list)
+
+    def __getitem__(self, item):
+        image_id, class_name, (x, y, w, h), bbox_3d = self.obj_pair_list[item]
+        pcd = np.load(str(fetch_xyzrgb_pcd_path(image_id)))  # H, W, 8
+        mask = np.load(str(fetch_xyzrgb_mask_path(image_id)))  # H, W
+        mask_crop = mask[y:y + h, x:x + w]
+        pcd_crop = pcd[y:y + h, x:x + w, :]
+        pcd_crop = pcd_crop[~mask_crop, :]  # N, 8
+        pcd_sample = pcd_crop[np.random.choice(pcd_crop.shape[0], self.num_points), :]
+        return pcd_sample, bbox_3d
+
+
+def create_masks():
+    for i in tqdm(range(1, 10336)):
+        image_id = '{:06d}'.format(i)
+        pcd = np.load(str(fetch_xyzrgb_pcd_path(image_id)))  # H, W, 8
+        mask = (pcd[:, :, 0] < 1e-5) & (pcd[:, :, 1] < 1e-5) & (pcd[:, :, 2] < 1e-5)
+        np.save(str('/home/junha/data/sunrefer/xyzrgb/mask{}.npy'.format(image_id)), mask)
 
 
 if __name__ == '__main__':
@@ -469,4 +589,15 @@ if __name__ == '__main__':
     # create_sampled_points('test', 1000)
     # evaluate_with_xyzrgb()
     # eval_from_pcd_data(split='val', use_seg_out=True)
-    project_3d_to_2d_bbox()
+    # project_3d_to_2d_bbox()
+    # scene_by_image_id = test_fetch_scene_object_by_image_id()
+    # scene = scene_by_image_id['000001']
+    # print(scene.tx)
+    # verify_single_meta_file()
+    # compute_2d_3d_bbox_correspondences()
+    # test_2d_3d_bbox_correspondences()
+    # compute_2d_3d_bbox_correspondences()
+    dataset = BoundingBoxCorrespondenceDataset(num_points=1000)
+    for pcd, bbox in tqdm(dataset):
+        pass
+    # create_masks()
