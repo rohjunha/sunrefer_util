@@ -9,6 +9,16 @@ import scipy.io
 from utils.directory import fetch_official_sunrgbd_dir, fetch_meta_v1_path, fetch_meta_2d_path, fetch_meta_3d_path
 
 
+CL = [[-1, -1, -1],
+      [1, -1, -1],
+      [-1, 1, -1],
+      [1, 1, -1],
+      [-1, -1, 1],
+      [1, -1, 1],
+      [-1, 1, 1],
+      [1, 1, 1]]
+
+
 class BoundingBox3DV1:
     def __init__(self, info):
         self.basis, self.coeffs, self.centroid, _class_name, _, _, self.orientation, _, _ = info
@@ -19,6 +29,22 @@ class BoundingBox3DV1:
             self.class_name, self.basis, self.coeffs, self.centroid, self.orientation)
 
 
+def aabb_from_oriented_bbox(verts):
+    x_min = np.min(verts[:, 0], axis=0)
+    x_max = np.max(verts[:, 0], axis=0)
+    y_min = np.min(verts[:, 1], axis=0)
+    y_max = np.max(verts[:, 1], axis=0)
+    z_min = np.min(verts[:, 2], axis=0)
+    z_max = np.max(verts[:, 2], axis=0)
+    cx = (x_min + x_max) / 2
+    cy = (y_min + y_max) / 2
+    cz = (z_min + z_max) / 2
+    sx = x_max - x_min
+    sy = y_max - y_min
+    sz = z_max - z_min
+    return [cx, cy, cz, sx, sy, sz]
+
+
 class BoundingBox3DV2:
     def __init__(self, info):
         self.basis, self.coeffs, self.centroid, _class_name, _, self.orientation, label = info
@@ -27,6 +53,24 @@ class BoundingBox3DV2:
     def __repr__(self):
         return 'BoundingBox3DV2 - class_name: {}, basis: {}, coeffs: {}, centroid: {}, orientation: {}'.format(
             self.class_name, self.basis, self.coeffs, self.centroid, self.orientation)
+
+    def aabb(self, center_size: bool):
+        centroid = self.centroid[0]  # (3, )
+        basis = self.basis  # (3, 3)
+        coeffs = self.coeffs[0]  # (3, )
+        dx = basis[0] * coeffs[0]
+        dy = basis[1] * coeffs[1]
+        dz = basis[2] * coeffs[2]
+
+        pl = [sx * dx + sy * dy + sz * dz for sx, sy, sz in CL]
+        cx, cy, cz, sx, sy, sz = aabb_from_oriented_bbox(np.array(pl))
+
+        if center_size:
+            return cx + centroid[0], cy + centroid[1], cz + centroid[2], sx, sy, sz
+        else:
+            return [[cx + 0.5 * dx * sx + centroid[0],
+                     cy + 0.5 * dy * sy + centroid[1],
+                     cz + 0.5 * dz * sz + centroid[2]] for dx, dy, dz in CL]
 
 
 class BoundingBox2DV2:
@@ -136,6 +180,20 @@ class MetaObject2DV2(MetaObjectBase):
         return class_dict
 
 
+def compute_inverse_rt(extrinsics):
+    """Computes the inverse 3x3 matrix from world coordinate to camera coordinate."""
+    Rt = np.eye(4, dtype=np.float32)
+    Rt[:3, :3] = extrinsics
+    Tyz = np.array([
+        [1, 0, 0, 0],
+        [0, 0, 1, 0],
+        [0, -1, 0, 0],
+        [0, 0, 0, 1]], dtype=np.float32)
+    Rt = Tyz @ Rt
+    iRt = np.linalg.inv(Rt)[:3, :3]
+    return iRt
+
+
 class MetaObject3DV2(MetaObjectBase):
     def __init__(self, item):
         seq_name, Rt, K, depth_path, rgb_path, anno_extrinsics, depth_name, rgb_name, sensor_type, valid, gt_3d_bbox = item
@@ -151,6 +209,62 @@ class MetaObject3DV2(MetaObjectBase):
         return 'MetaObject3DV2 - {}, valid: {}, sensor_type: {}, extrinsics: {}, gt_3d_bbox: [{}]'.format(
             MetaObjectBase.__repr__(self), self.valid, self.sensor_type, self.extrinsics,
             ', '.join([str(b) for b in self.gt_3d_bbox]))
+
+    @property
+    def fx(self):
+        return self.K[0, 0]
+
+    @property
+    def fy(self):
+        return self.K[1, 1]
+
+    @property
+    def cx(self):
+        return self.K[0, 2]
+
+    @property
+    def cy(self):
+        return self.K[1, 2]
+
+    def project_2d(self, p):
+        return p[0] / p[2] * self.fx + self.cx, p[1] / p[2] * self.fy + self.cy
+
+    def project_2d_bbox_from_3d_bbox(self, object_id: int, h: int = -1, w: int = -1):
+        bbox_3d = self.gt_3d_bbox[object_id]
+        inv_rt = compute_inverse_rt(self.extrinsics)
+
+        cx_, cy_, cz_, sx_, sy_, sz_ = bbox_3d.aabb(center_size=True)
+        y_ = cy_
+        x1_, x2_ = cx_ - 0.5 * sx_, cx_ + 0.5 * sx_
+        z1_, z2_ = cz_ - 0.5 * sz_, cz_ + 0.5 * sz_
+
+        # Choose a plane with the mean y-value.
+        # P1 +-----+ P2
+        #    |     |
+        # P4 +-----+ P3
+        P1 = np.array((x1_, y_, z2_)) @ np.transpose(inv_rt)
+        P2 = np.array((x2_, y_, z2_)) @ np.transpose(inv_rt)
+        P3 = np.array((x2_, y_, z1_)) @ np.transpose(inv_rt)
+        P4 = np.array((x1_, y_, z1_)) @ np.transpose(inv_rt)
+
+        # Project the corner points into 2D plane.
+        pp1 = self.project_2d(P1)
+        pp2 = self.project_2d(P2)
+        pp3 = self.project_2d(P3)
+        pp4 = self.project_2d(P4)
+
+        y1 = 0.5 * (pp1[1] + pp2[1])
+        y2 = 0.5 * (pp3[1] + pp4[1])
+        x1 = 0.5 * (pp1[0] + pp4[0])
+        x2 = 0.5 * (pp2[0] + pp3[0])
+
+        if w > 0 and h > 0:
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(w, x2)
+            y2 = min(h, y2)
+        # x, y, w, h
+        return int(x1), int(y1), int(x2 - x1), int(y2 - y1)
 
 
 class MetaObjectV1(MetaObjectBase):

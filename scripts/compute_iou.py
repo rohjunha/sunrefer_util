@@ -13,46 +13,37 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from utils.directory import fetch_segformer_path, fetch_xyzrgb_pcd_path, fetch_xyzrgb_bbox_path, fetch_split_test_path, \
-    fetch_split_train_path, fetch_object_2d_3d_path
+    fetch_split_train_path, fetch_object_2d_3d_path, fetch_sunrefer_anno_path
 from utils.intrinsic_fetcher import IntrinsicFetcher
 from utils.line_mesh import LineMesh
 from utils.meta_io import fetch_scene_object_by_image_id, MetaObject2DV2, MetaObject3DV2
 from utils.pred_and_anno import fetch_predicted_bbox_by_image_id
 
 
-def convert_orientedbbox2AABB(verts):
-    # c_x = all_bboxes[:, 0]
-    # c_y = all_bboxes[:, 1]
-    # c_z = all_bboxes[:, 2]
-    # s_x = all_bboxes[:, 3]
-    # s_y = all_bboxes[:, 4]
-    # s_z = all_bboxes[:, 5]
-    # angle = all_bboxes[:, 6]
-    # orientation = np.concatenate([np.cos(angle)[:, np.newaxis],
-    #                               -np.sin(angle)[:, np.newaxis]], axis=1)
-    # ori1 = orientation
-    # ori2 = np.ones(ori1.shape)
-    # ori2 = ori2 - np.sum(ori1 * ori2, axis=1)[:, np.newaxis] * ori1
-    # ori2 = ori2 / np.linalg.norm(ori2, axis=1)[:, np.newaxis]
-    # ori1 = ori1 * s_x[:, np.newaxis]
-    # ori2 = ori2 * s_y[:, np.newaxis]
-    # verts = np.array([[c_x, c_y, c_z - s_z / 2],
-    #                   [c_x, c_y, c_z + s_z / 2],
-    #                   [c_x, c_y, c_z - s_z / 2],
-    #                   [c_x, c_y, c_z + s_z / 2],
-    #                   [c_x, c_y, c_z - s_z / 2],
-    #                   [c_x, c_y, c_z + s_z / 2],
-    #                   [c_x, c_y, c_z - s_z / 2],
-    #                   [c_x, c_y, c_z + s_z / 2]])
-    # verts = verts.transpose(2, 0, 1)
-    # verts[:, 0, 0:2] = verts[:, 0, 0:2] - ori2 / 2 - ori1 / 2
-    # verts[:, 1, 0:2] = verts[:, 1, 0:2] - ori2 / 2 - ori1 / 2
-    # verts[:, 2, 0:2] = verts[:, 2, 0:2] - ori2 / 2 + ori1 / 2
-    # verts[:, 3, 0:2] = verts[:, 3, 0:2] - ori2 / 2 + ori1 / 2
-    # verts[:, 4, 0:2] = verts[:, 4, 0:2] + ori2 / 2 - ori1 / 2
-    # verts[:, 5, 0:2] = verts[:, 5, 0:2] + ori2 / 2 - ori1 / 2
-    # verts[:, 6, 0:2] = verts[:, 6, 0:2] + ori2 / 2 + ori1 / 2
-    # verts[:, 7, 0:2] = verts[:, 7, 0:2] + ori2 / 2 + ori1 / 2
+def convert_raw_depth(raw_depth):
+    """Numpy implementation of SUNRGBD depth processing."""
+    shift_depth = np.bitwise_or(np.right_shift(raw_depth, 3), np.left_shift(raw_depth, 13))
+    float_depth = shift_depth.astype(dtype=np.float32) / 1000.
+    float_depth[float_depth > 7.0] = 0.
+    return float_depth
+
+
+def convert_pcd(raw_depth, extrinsics, fx, fy, cx, cy):
+    m = raw_depth > 0
+    zz = convert_raw_depth(raw_depth)
+    mx = np.linspace(0, raw_depth.shape[1] - 1, raw_depth.shape[1])
+    my = np.linspace(0, raw_depth.shape[0] - 1, raw_depth.shape[0])
+    rx = np.linspace(0., 1., raw_depth.shape[1])
+    ry = np.linspace(0., 1., raw_depth.shape[0])
+    rx, ry = np.meshgrid(rx, ry)
+    xx, yy = np.meshgrid(mx, my)
+    xx = (xx - cx) * zz / fx
+    yy = (yy - cy) * zz / fy
+    pcd = np.stack((xx, yy, zz), axis=-1) @ np.transpose(extrinsics)
+    return pcd, m, rx, ry
+
+
+def aabb_from_oriented_bbox(verts):
     x_min = np.min(verts[:, 0], axis=0)
     x_max = np.max(verts[:, 0], axis=0)
     y_min = np.min(verts[:, 1], axis=0)
@@ -87,7 +78,7 @@ def create_line_mesh(centroid, basis, coeffs, aabb: bool, color=[1, 0, 0], radiu
     pl = [sx * dx + sy * dy + sz * dz for sx, sy, sz in cl]
 
     if aabb:
-        cx, cy, cz, sx, sy, sz = convert_orientedbbox2AABB(np.array(pl))
+        cx, cy, cz, sx, sy, sz = aabb_from_oriented_bbox(np.array(pl))
         pl = [[cx + 0.5 * dx * sx, cy + 0.5 * dy * sy, cz + 0.5 * dz * sz] for dx, dy, dz in cl]
 
     line_mesh = LineMesh(pl, lines=LINES, colors=color, radius=radius)
@@ -301,7 +292,7 @@ class PredictionVisualizer:
 
     def compute_3d_bbox_by_image_id(self, image_id: str, anno_index: int):
         uniq_id, bbox_2d = self.pred_bbox_by_image_id[image_id][anno_index]
-        return self.compute_3d_bbox(uniq_id, bbox_2d)
+        return self.compute_3d_bbox_and_2d_projection(uniq_id)
 
     def extract_rgbxyz_pcd(self, image_id: str):
         scene = self.scene_by_image_id[image_id]
@@ -322,28 +313,6 @@ class PredictionVisualizer:
         color_np = np.asarray(color_raw, dtype=np.uint8)
         depth_np = np.asarray(depth_raw, dtype=np.uint16)
 
-        def convert_raw_depth(raw_depth):
-            # d = (d >> 3) | (d << 13);
-            shift_depth = np.bitwise_or(np.right_shift(raw_depth, 3), np.left_shift(raw_depth, 13))
-            float_depth = shift_depth.astype(dtype=np.float32) / 1000.
-            float_depth[float_depth > 7.0] = 0.
-            return float_depth
-
-        def convert_pcd(raw_depth, extrinsics):
-            m = raw_depth > 0
-            zz = convert_raw_depth(raw_depth)
-            mx = np.linspace(0, raw_depth.shape[1] - 1, raw_depth.shape[1])
-            my = np.linspace(0, raw_depth.shape[0] - 1, raw_depth.shape[0])
-            rx = np.linspace(0., 1., raw_depth.shape[1])
-            ry = np.linspace(0., 1., raw_depth.shape[0])
-            rx, ry = np.meshgrid(rx, ry)
-            xx, yy = np.meshgrid(mx, my)
-            xx = (xx - cx) * zz / fx
-            yy = (yy - cy) * zz / fy
-            pcd = np.stack((xx, yy, zz), axis=-1) @ np.transpose(extrinsics)
-            # pcd = pcd @ np.transpose(Tyz[:3, :3])
-            return pcd, m, rx, ry
-
         def normalize_rgb(raw_rgb):
             float_rgb = np.array(raw_rgb).astype(np.float32) / 255.
             float_rgb[..., 0] = (float_rgb[..., 0] - 0.485) / 0.229
@@ -351,12 +320,11 @@ class PredictionVisualizer:
             float_rgb[..., 2] = (float_rgb[..., 2] - 0.406) / 0.225
             return float_rgb
 
-        pcd, m, rx, ry = convert_pcd(raw_depth=depth_np, extrinsics=scene.extrinsics)
+        pcd, m, rx, ry = convert_pcd(raw_depth=depth_np, extrinsics=scene.extrinsics, fx=fx, fy=fy, cx=cx, cy=cy)
         rgb = normalize_rgb(raw_rgb=color_np)
         xyzrgb = np.concatenate((pcd, rx[..., np.newaxis], ry[..., np.newaxis], rgb), axis=-1)
         # xyzrgb[..., 1] *= -1.
         # xyzrgb[..., 2] *= -1.
-
 
         new_xyz = xyzrgb[m, :]
         from scipy import interpolate
@@ -373,28 +341,6 @@ class PredictionVisualizer:
                 gg = int((G * 0.224 + 0.456) * 255)
                 bb = int((B * 0.225 + 0.406) * 255)
                 new_rgb[int(yy), int(xx), :] = rr, gg, bb
-        #     xl.append(xx)
-        #     yl.append(yy)
-        #     rl.append(rr)
-        #     gl.append(gg)
-        #     bl.append(bb)
-        # fr = interpolate.interp2d(xl, yl, rl)
-        # fg = interpolate.interp2d(xl, yl, gl)
-        # fb = interpolate.interp2d(xl, yl, bl)
-
-
-        # rx = np.linspace(0., width - 1, width)
-        # ry = np.linspace(0., height - 1, height)
-        # # xx, yy = np.meshgrid(rx, ry)
-        # # xx = xx.reshape(-1)
-        # # yy = yy.reshape(-1)
-        # rnew = (fr(rx, ry) * 255).astype(np.uint8)
-        # # gnew = (fg(rx, ry) * 255).astype(np.uint8)
-        # # bnew = (fb(rx, ry) * 255).astype(np.uint8)
-        # print(rnew.shape, rnew.dtype)
-        # new_rgb[..., 0] = rnew
-        # new_rgb[..., 1] = gnew
-        # new_rgb[..., 2] = bnew
         plt.imshow(new_rgb)
         plt.show()
 
@@ -444,8 +390,7 @@ class PredictionVisualizer:
             o3d.visualization.draw_geometries(o3d_obj_list)
         return xyzrgb, aabb_bbox_list
 
-    def compute_3d_bbox(self, uniq_id: str, bbox_2d: List[float]):
-        # try:
+    def compute_3d_bbox(self, uniq_id: str):
         image_id, object_id, anno_id = uniq_id.split('_')
         object_id = int(object_id)
         scene = self.scene_by_image_id[image_id]
@@ -453,205 +398,148 @@ class PredictionVisualizer:
 
         Rt = np.eye(4, dtype=np.float32)
         Rt[:3, :3] = scene.extrinsics
-        iRt = np.linalg.inv(Rt)
-
-        Tyz = np.array([[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]], dtype=np.float32)
-        iTyz = np.linalg.inv(Tyz)
-        tr_flip = [[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]]
+        Tyz = np.array([
+            [1, 0, 0, 0],
+            [0, 0, 1, 0],
+            [0, -1, 0, 0],
+            [0, 0, 0, 1]], dtype=np.float32)
+        Rt = Tyz @ Rt
 
         color_raw = cv2.imread(str(scene.rgb_path), cv2.IMREAD_COLOR)
         depth_raw = cv2.imread(str(scene.depth_path), cv2.IMREAD_UNCHANGED)
-        # rgbd_image = o3d.geometry.RGBDImage.create_from_sun_format(
-        #     o3d.geometry.Image(color_raw),
-        #     o3d.geometry.Image(depth_raw),
-        #     convert_rgb_to_intensity=False)
-
-        color_np = np.asarray(color_raw, dtype=np.uint8)
-        depth_np = np.asarray(depth_raw, dtype=np.uint16)
-
-        x1, y1, w, h = bbox_2d
-        x1 = int(x1 + 0.5 * w * (1 - self.bbox_2d_ratio))
-        x2 = int(x1 + 0.5 * w * (1 + self.bbox_2d_ratio))
-        y1 = int(y1 + 0.5 * h * (1 - self.bbox_2d_ratio))
-        y2 = int(y1 + 0.5 * h * (1 + self.bbox_2d_ratio))
-
-        p1 = x1, y1
-        p2 = x1, y2
-        p3 = x2, y2
-        p4 = x2, y1
-        print(p1)
-        print(p2)
-        print(p3)
-        print(p4)
-
-        # def convert_point_2d_to_3d(qx, qy):
-        #     uz = np.uint16(depth_np[qy, qx])
-        #     sz = (np.bitwise_or(np.right_shift(uz, 3), np.left_shift(uz, 13)))
-        #     z = float(sz) / 1000.
-        #     print(uz, sz, z)
-        #     return (qx - cx) * z / fx, (qy - cy) * z / fy, z
-        #
-        # P1 = convert_point_2d_to_3d(*p1)
-        # P2 = convert_point_2d_to_3d(*p2)
-        # P3 = convert_point_2d_to_3d(*p3)
-        # P4 = convert_point_2d_to_3d(*p4)
-        # print(P1)
-        # print(P2)
-        # print(P3)
-        # print(P4)
-
-        def convert_raw_depth(raw_depth):
-            # d = (d >> 3) | (d << 13);
-            shift_depth = np.bitwise_or(np.right_shift(raw_depth, 3), np.left_shift(raw_depth, 13))
-            float_depth = shift_depth.astype(dtype=np.float32) / 1000.
-            float_depth[float_depth > 7.0] = 0.
-            return float_depth
-
-        m = depth_np > 0
-        z = convert_raw_depth(depth_np)
-        mx = np.linspace(0, depth_np.shape[1] - 1, depth_np.shape[1])
-        my = np.linspace(0, depth_np.shape[0] - 1, depth_np.shape[0])
-        xx, yy = np.meshgrid(mx, my)
-        xx = (xx - cx) * z / fx
-        yy = (yy - cy) * z / fy
-
-        pcd_custom = np.stack((xx, yy, z), axis=-1)
-        pcd_custom = pcd_custom @ np.transpose(scene.extrinsics)
-        pcd_custom_flat = pcd_custom[m, :]
-        # pcd_custom_flat = pcd_custom_flat @ np.transpose(scene.extrinsics)
-        # pcd_custom_flat = pcd_custom_flat @ np.linalg.inv(scene.extrinsics)
-
-        print(pcd_custom[y1, x1])
-        print(pcd_custom[y1, x2])
-        print(pcd_custom[y2, x2])
-        print(pcd_custom[y2, x1])
-
-        print(pcd_custom.shape)
-        print(pcd_custom_flat.shape)
-
-        print(depth_np.shape)
-        print(xx)
-        print(yy)
-
-        new_pcd = o3d.geometry.PointCloud()
-        new_pcd.points = o3d.utility.Vector3dVector(pcd_custom_flat)
-        new_pcd.transform(tr_flip)
-
-        new_color_np = np.zeros_like(color_np)
-        new_depth_np = np.zeros_like(depth_np)
-        new_color_np[y1:y2, x1:x2, :] = color_np[y1:y2, x1:x2, :]
-        new_depth_np[y1:y2, x1:x2] = depth_np[y1:y2, x1:x2]
-
-        if self.apply_seg_out_mask:
-            seg_out_mask = self.fetch_seg_out_mask(image_id)
-            if np.sum(seg_out_mask[y1:y2, x1:x2].astype(np.int64)) < (y2 - y1) * (x2 - x1) * self.mask_ratio:
-                new_color_np[seg_out_mask, :] = 0
-                new_depth_np[seg_out_mask] = 0.
-
-        new_color = o3d.geometry.Image(np.ascontiguousarray(new_color_np).astype(np.uint8))
-        new_depth = o3d.geometry.Image(np.ascontiguousarray(new_depth_np).astype(np.uint16))
-        new_rgbd_image = o3d.geometry.RGBDImage.create_from_sun_format(new_color, new_depth,
-                                                                       convert_rgb_to_intensity=False)
-
-        # import matplotlib.pyplot as plt
-        # plt.subplot(1, 2, 1)
-        # plt.title('SUN grayscale image')
-        # plt.imshow(new_rgbd_image.color)
-        # plt.subplot(1, 2, 2)
-        # plt.title('SUN depth image')
-        # plt.imshow(new_rgbd_image.depth)
-        # plt.show()
-
+        rgbd_image = o3d.geometry.RGBDImage.create_from_sun_format(
+            o3d.geometry.Image(color_raw),
+            o3d.geometry.Image(depth_raw),
+            convert_rgb_to_intensity=False)
         pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
-            image=new_rgbd_image,
+            image=rgbd_image,
             intrinsic=o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy, cx, cy))
         pcd.transform(Rt)
-        pcd.transform(tr_flip)
 
-        if self.pcd_th_ratio > 1e-3:
-            labels = np.array(pcd.cluster_dbscan(eps=0.02, min_points=10, print_progress=False))
+        o3d_obj_list = []
+        o3d_obj_list.append(pcd)
 
-            max_label = labels.max()
-            colors = plt.get_cmap("tab20")(labels / (max_label if max_label > 0 else 1))
-            colors[labels < 0] = 0
-            pcd.colors = o3d.utility.Vector3dVector(colors[:, :3])
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.6, origin=[0, 0, 0])
+        o3d_obj_list.append(coord_frame)
 
-            num_points = labels.shape[0]
-            num_count_threshold = int(self.pcd_th_ratio * num_points)
-            inlier_labels = []
-            for l in range(np.min(labels), np.max(labels) + 1):
-                count = np.sum(labels == l)
-                if count > num_count_threshold:
-                    inlier_labels.append(l)
-            indices = np.where(np.isin(labels, inlier_labels))[0]
-            inlier_pcd = pcd.select_by_index(indices)
-        else:
-            inlier_pcd = pcd
-
-        aabb_from_pcd = inlier_pcd.get_axis_aligned_bounding_box()
-        aabb_from_pcd.color = (0, 1, 1)
-        aabb_points = np.asarray(aabb_from_pcd.get_box_points())
-        aabb_points = np.array([aabb_points[i] for i in [0, 1, 2, 7, 3, 6, 5, 4]])
-        bbox_mesh = LineMesh(aabb_points, colors=(0, 1, 1), radius=0.03)
-
-        if self.verbose:
-            o3d_obj_list = []
-            o3d_obj_list += bbox_mesh.cylinder_segments
-            o3d_obj_list.append(pcd)
-            o3d_obj_list.append(new_pcd)
-
-            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.6, origin=[0, 0, 0])
-            o3d_obj_list.append(coord_frame)
-
-            target_mesh = None
-            for oid, bbox_3d in enumerate(scene.gt_3d_bbox):
-                # class_name = bbox_3d.class_name[0]  # str
-                centroid = bbox_3d.centroid[0]  # (3, )
-                basis = bbox_3d.basis  # (3, 3)
-                coeffs = bbox_3d.coeffs[0]  # (3, )
-                # orientation = bbox_3d.orientation[0]  # (3, )
-
-                if self.highlight and oid == object_id:
-                    color = [0, 1, 0]
-                    radius = 0.03
-                else:
-                    color = [1, 0, 0]
-                    radius = 0.015
-
-                # print('centroid', centroid)
-                # print('basis', basis)
-                # # centroid = (iRt[:3, :3] @ centroid.reshape(3, 1)).reshape(3, )
-                # basis = iRt[:3, :3] @ basis
-                # print('centroid', centroid)
-                # print('basis', basis)
-
-                line_mesh = create_line_mesh(centroid, basis, coeffs, aabb=self.aabb, color=color, radius=radius)
-                # line_mesh.transform(iRt)
-                line_mesh.transform(iTyz)
-                #
-                # line_mesh.transform(iRt)
-                line_mesh.transform(tr_flip)
-                o3d_obj_list += line_mesh.cylinder_segments
-                if oid == object_id:
-                    target_mesh = line_mesh
-            o3d.visualization.draw_geometries(o3d_obj_list)
-        else:
-            bbox_3d = scene.gt_3d_bbox[object_id]
+        for oid, bbox_3d in enumerate(scene.gt_3d_bbox):
+            # class_name = bbox_3d.class_name[0]  # str
             centroid = bbox_3d.centroid[0]  # (3, )
             basis = bbox_3d.basis  # (3, 3)
             coeffs = bbox_3d.coeffs[0]  # (3, )
-            target_mesh = create_line_mesh(centroid, basis, coeffs, aabb=self.aabb)
-            target_mesh.transform(iTyz)
-            target_mesh.transform(tr_flip)
 
-        print(target_mesh.points)
-        print(bbox_mesh.points)
+            if self.highlight and oid == object_id:
+                color = [0, 1, 0]
+                radius = 0.03
+            else:
+                color = [1, 0, 0]
+                radius = 0.015
 
-        overlap_volume, iou = line_mesh_iou(bbox_mesh, target_mesh)
-        return iou.item()
-        # except:
-        #     print('found an error during computing iou: {}'.format(uniq_id, bbox_2d))
-        #     return 0.
+            line_mesh = create_line_mesh(centroid, basis, coeffs, aabb=self.aabb, color=color, radius=radius)
+            o3d_obj_list += line_mesh.cylinder_segments
+        o3d.visualization.draw_geometries(o3d_obj_list)
+
+    def compute_3d_bbox_and_2d_projection(self, uniq_id: str):
+        image_id, object_id, anno_id = uniq_id.split('_')
+        object_id = int(object_id)
+        scene = self.scene_by_image_id[image_id]
+        fx, fy, cx, cy, height, width = self.intrinsic_fetcher[image_id]
+
+        Rt = np.eye(4, dtype=np.float32)
+        Rt[:3, :3] = scene.extrinsics
+        Tyz = np.array([
+            [1, 0, 0, 0],
+            [0, 0, 1, 0],
+            [0, -1, 0, 0],
+            [0, 0, 0, 1]], dtype=np.float32)
+        Rt = Tyz @ Rt
+        iRt = np.linalg.inv(Rt)[:3, :3]
+
+        color_raw = cv2.imread(str(scene.rgb_path), cv2.IMREAD_COLOR)
+        depth_raw = cv2.imread(str(scene.depth_path), cv2.IMREAD_UNCHANGED)
+        rgbd_image = o3d.geometry.RGBDImage.create_from_sun_format(
+            o3d.geometry.Image(color_raw),
+            o3d.geometry.Image(depth_raw),
+            convert_rgb_to_intensity=False)
+        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
+            image=rgbd_image,
+            intrinsic=o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy, cx, cy))
+        pcd.transform(Rt)
+
+        o3d_obj_list = []
+        o3d_obj_list.append(pcd)
+
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.6, origin=[0, 0, 0])
+        o3d_obj_list.append(coord_frame)
+
+        for oid, bbox_3d in enumerate(scene.gt_3d_bbox):
+            class_name = bbox_3d.class_name
+            centroid = bbox_3d.centroid[0]  # (3, )
+            basis = bbox_3d.basis  # (3, 3)
+            coeffs = bbox_3d.coeffs[0]  # (3, )
+
+            if self.highlight and oid == object_id:
+                color = [0, 1, 0]
+                radius = 0.03
+            else:
+                color = [1, 0, 0]
+                radius = 0.015
+
+            line_mesh = create_line_mesh(centroid, basis, coeffs, aabb=self.aabb, color=color, radius=radius)
+            o3d_obj_list += line_mesh.cylinder_segments
+
+            p1 = np.min(line_mesh.points, axis=0)
+            p2 = np.max(line_mesh.points, axis=0)
+            y = (p1[1] + p2[1]) * 0.5
+            x1, x2 = p1[0], p2[0]
+            z1, z2 = p1[2], p2[2]
+
+            # Choose a plane with the mean y-value.
+            # P1 +-----+ P2
+            #    |     |
+            # P4 +-----+ P3
+            P1 = np.array((x1, y, z2)) @ np.transpose(iRt)
+            P2 = np.array((x2, y, z2)) @ np.transpose(iRt)
+            P3 = np.array((x2, y, z1)) @ np.transpose(iRt)
+            P4 = np.array((x1, y, z1)) @ np.transpose(iRt)
+
+            # Project the corner points into 2D plane.
+            def project_2d(P, fx, fy, cx, cy):
+                return P[0] / P[2] * fx + cx, P[1] / P[2] * fy + cy
+
+            pp1 = project_2d(P1, fx, fy, cx, cy)
+            pp2 = project_2d(P2, fx, fy, cx, cy)
+            pp3 = project_2d(P3, fx, fy, cx, cy)
+            pp4 = project_2d(P4, fx, fy, cx, cy)
+
+            print(oid, class_name)
+            print(bbox_3d)
+            print(line_mesh.points)
+            print(P1, P2, P3, P4)
+            print(pp1, pp2, pp3, pp4)
+            y1 = 0.5 * (pp1[1] + pp2[1])
+            y2 = 0.5 * (pp3[1] + pp4[1])
+            x1 = 0.5 * (pp1[0] + pp4[0])
+            x2 = 0.5 * (pp2[0] + pp3[0])
+            print(x1, x2, y1, y2)
+
+            cv2.rectangle(img=color_raw,
+                          pt1=(int(x1), int(y1)),
+                          pt2=(int(x2), int(y2)),
+                          color=(255, 0, 0),
+                          thickness=2)
+            cv2.putText(img=color_raw,
+                        text=class_name,
+                        org=(int(x1), int(y1)),
+                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                        fontScale=1,
+                        color=(255, 0, 0),
+                        thickness=2,
+                        lineType=cv2.LINE_AA)
+        plt.imshow(color_raw)
+        plt.show()
+
+        o3d.visualization.draw_geometries(o3d_obj_list)
 
 
 def create_xyzrgb_and_aabb():
@@ -681,10 +569,9 @@ def visualize_annotation(image_id: str, anno_idx: int):
         apply_seg_out_mask=True,
         verbose=True,
         bbox_2d_ratio=1.0,
-        pcd_th_ratio=0.1,
+        pcd_th_ratio=0,
         mask_ratio=0.8)
     vis.compute_3d_bbox_by_image_id(image_id, anno_idx)
-
 
 
 def test():
@@ -694,16 +581,161 @@ def test():
         apply_seg_out_mask=True,
         verbose=True,
         bbox_2d_ratio=1.0,
-        pcd_th_ratio=0.1,
+        pcd_th_ratio=0,
         mask_ratio=0.8)
 
     image_id = '002920'
     xyzrgb, aabb_list = vis.extract_rgbxyz_pcd(image_id)
 
 
+def create_aabb_from_bbox_3d(bbox_3d, center_size: bool):
+    centroid = bbox_3d.centroid[0]  # (3, )
+    basis = bbox_3d.basis  # (3, 3)
+    coeffs = bbox_3d.coeffs[0]  # (3, )
+    dx = basis[0] * coeffs[0]
+    dy = basis[1] * coeffs[1]
+    dz = basis[2] * coeffs[2]
+
+    cl = [[-1, -1, -1],
+          [1, -1, -1],
+          [-1, 1, -1],
+          [1, 1, -1],
+          [-1, -1, 1],
+          [1, -1, 1],
+          [-1, 1, 1],
+          [1, 1, 1]]
+    pl = [sx * dx + sy * dy + sz * dz for sx, sy, sz in cl]
+    cx, cy, cz, sx, sy, sz = aabb_from_oriented_bbox(np.array(pl))
+
+    if center_size:
+        return cx + centroid[0], cy + centroid[1], cz + centroid[2], sx, sy, sz
+    else:
+        return [[cx + 0.5 * dx * sx + centroid[0],
+                 cy + 0.5 * dy * sy + centroid[1],
+                 cz + 0.5 * dz * sz + centroid[2]] for dx, dy, dz in cl]
+
+
+def fetch_2d_bbox_from_3d(bbox_3d, iRt, fx, fy, cx, cy):
+    cx_, cy_, cz_, sx_, sy_, sz_ = create_aabb_from_bbox_3d(bbox_3d, center_size=True)
+    y_ = cy_
+    x1_, x2_ = cx_ - 0.5 * sx_, cx_ + 0.5 * sx_
+    z1_, z2_ = cz_ - 0.5 * sz_, cz_ + 0.5 * sz_
+
+    # Choose a plane with the mean y-value.
+    # P1 +-----+ P2
+    #    |     |
+    # P4 +-----+ P3
+    P1 = np.array((x1_, y_, z2_)) @ np.transpose(iRt)
+    P2 = np.array((x2_, y_, z2_)) @ np.transpose(iRt)
+    P3 = np.array((x2_, y_, z1_)) @ np.transpose(iRt)
+    P4 = np.array((x1_, y_, z1_)) @ np.transpose(iRt)
+
+    # Project the corner points into 2D plane.
+    def project_2d(P, fx, fy, cx, cy):
+        return P[0] / P[2] * fx + cx, P[1] / P[2] * fy + cy
+
+    pp1 = project_2d(P1, fx, fy, cx, cy)
+    pp2 = project_2d(P2, fx, fy, cx, cy)
+    pp3 = project_2d(P3, fx, fy, cx, cy)
+    pp4 = project_2d(P4, fx, fy, cx, cy)
+
+    y1 = 0.5 * (pp1[1] + pp2[1])
+    y2 = 0.5 * (pp3[1] + pp4[1])
+    x1 = 0.5 * (pp1[0] + pp4[0])
+    x2 = 0.5 * (pp2[0] + pp3[0])
+    x, y, w, h = int(x1), int(y1), int(x2 - x1), int(y2 - y1)
+
+    # class_name = bbox_3d.class_name
+    # cv2.rectangle(img=color_raw,
+    #               pt1=(int(x1), int(y1)),
+    #               pt2=(int(x2), int(y2)),
+    #               color=(255, 0, 0),
+    #               thickness=2)
+    # cv2.putText(img=color_raw,
+    #             text=class_name,
+    #             org=(int(x1), int(y1)),
+    #             fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+    #             fontScale=1,
+    #             color=(255, 0, 0),
+    #             thickness=2,
+    #             lineType=cv2.LINE_AA)
+    return x, y, w, h
+
+
+def compute_iou_xywh(v1, v2):
+    x1, y1, w1, h1 = v1
+    x2, y2, w2, h2 = v2
+    a1, a2 = w1 * h1, w2 * h2
+
+    Ax1, Ax2, Ay1, Ay2 = x1, x1 + w1, y1, y1 + h1
+    Bx1, Bx2, By1, By2 = x2, x2 + w2, y2, y2 + h2
+    Cx1, Cx2 = max(Ax1, Bx1), min(Ax2, Bx2)
+    Cy1, Cy2 = max(Ay1, By1), min(Ay2, By2)
+
+    if Cx1 >= Cx2 or Cy1 >= Cy2:
+        return 0.
+
+    ai = (Cx2 - Cx1) * (Cy2 - Cy1)
+    au = a1 + a2 - ai
+    if au <= 1e-5:
+        return 0.
+    return ai / au
+
+
+def iou_stats_from_list(iou_list):
+    if not iou_list:
+        print('got empty iou list')
+    else:
+        iou = np.array(iou_list).reshape(-1, )
+        iou_25 = np.sum(iou > 0.25) / iou.shape[0] * 100
+        iou_50 = np.sum(iou > 0.5) / iou.shape[0] * 100
+        print('mean iou: {:5.3f}'.format(np.mean(iou) * 100))
+        print('acc@0.25: {:5.3f}'.format(iou_25))
+        print('acc@0.5 : {:5.3f}'.format(iou_50))
+
+
+def compute_3d_to_2d_projection():
+    scene_by_image_id = fetch_scene_object_by_image_id('v2_3d')
+    intrinsic_fetcher = IntrinsicFetcher()
+
+    with open(str(fetch_sunrefer_anno_path()), 'r') as file:
+        anno_dict = json.load(file)
+
+    test_iou = []
+    train_iou = []
+    for image_object_id, annotation in anno_dict.items():
+        image_id, object_id = image_object_id.split('_')
+        _, _, _, _, h, w = intrinsic_fetcher[image_id]
+        train = int(image_id) >= 5051
+        object_id = int(object_id)
+        scene = scene_by_image_id[image_id]
+        gt_bbox_2d = annotation['bbox2d']
+        pr_bbox_2d = scene.project_2d_bbox_from_3d_bbox(object_id, w=w, h=h)
+        iou = compute_iou_xywh(gt_bbox_2d, pr_bbox_2d)
+        if train:
+            train_iou.append(iou)
+        else:
+            test_iou.append(iou)
+
+    print('TRAIN')
+    iou_stats_from_list(train_iou)
+    print('TEST')
+    iou_stats_from_list(test_iou)
+
+    # for uniq_id in ['000001_4_0']:
+    #     image_id, object_id, anno_id = uniq_id.split('_')
+    #     object_id = int(object_id)
+    #     scene = scene_by_image_id[image_id]
+    #     fx, fy, cx, cy, height, width = intrinsic_fetcher[image_id]
+    #     bbox_2d = fetch_2d_bbox_from_3d(scene.gt_3d_bbox[object_id],
+    #                                     compute_inverse_rt(scene.extrinsics), fx, fy, cx, cy)
+    #     print(bbox_2d)
+
+
 if __name__ == '__main__':
     # test()
-    visualize_annotation('000001', 0)
+    # visualize_annotation('000001', 0)
+    compute_3d_to_2d_projection()
     # compute_average_iou(aabb=True,
     #                     use_seg_out_mask=True,
     #                     bbox_2d_ratio=1.0,
