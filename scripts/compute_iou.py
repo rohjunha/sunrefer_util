@@ -1,7 +1,7 @@
 import json
 from multiprocessing import Pool
 from pathlib import Path
-from typing import List, Union, Tuple, Dict
+from typing import List, Union, Tuple, Dict, Any
 
 import cv2
 import numpy as np
@@ -62,7 +62,13 @@ def aabb_from_oriented_bbox(verts):
 LINES = [[0, 1], [0, 2], [1, 3], [2, 3], [4, 5], [4, 6], [5, 7], [6, 7], [0, 4], [1, 5], [2, 6], [3, 7]]
 
 
-def create_line_mesh(centroid, basis, coeffs, aabb: bool, color=[1, 0, 0], radius=0.015):
+def create_line_mesh(
+        centroid: np.array,
+        basis: np.array,
+        coeffs: np.array,
+        aabb: bool,
+        color: Tuple[float, float, float] = (1., 0., 0.),
+        radius: float = 0.015):
     dx = basis[0] * coeffs[0]
     dy = basis[1] * coeffs[1]
     dz = basis[2] * coeffs[2]
@@ -84,6 +90,23 @@ def create_line_mesh(centroid, basis, coeffs, aabb: bool, color=[1, 0, 0], radiu
     line_mesh = LineMesh(pl, lines=LINES, colors=color, radius=radius)
     line_mesh.translate(centroid)
     return line_mesh
+
+
+def create_line_mesh_from_dict(
+        bbox_dict: Dict[str, Any],
+        aabb: bool,
+        color: Tuple[float, float, float] = (1., 0., 0.),
+        radius: float = 0.015) -> LineMesh:
+    centroid = np.reshape(bbox_dict['centroid'], (3, ))
+    basis = bbox_dict['basis']
+    coeffs = np.reshape(bbox_dict['coeffs'], (3, ))
+    return create_line_mesh(
+        centroid=centroid,
+        basis=basis,
+        coeffs=coeffs,
+        aabb=aabb,
+        color=color,
+        radius=radius)
 
 
 def create_line_mesh_from_center_size(
@@ -260,6 +283,14 @@ def compute_average_iou(
     print('acc@0.50: {:5.3f}'.format(iou_50))
 
 
+def normalize_rgb(raw_rgb):
+    float_rgb = np.array(raw_rgb).astype(np.float32) / 255.
+    float_rgb[..., 0] = (float_rgb[..., 0] - 0.485) / 0.229
+    float_rgb[..., 1] = (float_rgb[..., 1] - 0.456) / 0.224
+    float_rgb[..., 2] = (float_rgb[..., 2] - 0.406) / 0.225
+    return float_rgb
+
+
 class PredictionVisualizer:
     def __init__(self,
                  aabb: bool,
@@ -282,6 +313,7 @@ class PredictionVisualizer:
         self.pred_bbox_by_image_id = fetch_predicted_bbox_by_image_id()
         self.seg_out_dir = Path('/home/junha/Downloads/segformer')
         self.exception_label_indices = [0, 3, 5]
+        self.cls_aabb_list = json.load(open(str(fetch_xyzrgb_bbox_path()), 'r'))
 
     def fetch_seg_out_mask(self, image_id: str):
         seg_out = np.load(str(fetch_segformer_path(image_id)))
@@ -294,7 +326,7 @@ class PredictionVisualizer:
         uniq_id, bbox_2d = self.pred_bbox_by_image_id[image_id][anno_index]
         return self.compute_3d_bbox_and_2d_projection(uniq_id)
 
-    def extract_rgbxyz_pcd(self, image_id: str):
+    def _extract_rgbxyz_pcd(self, image_id: str):
         scene = self.scene_by_image_id[image_id]
         fx, fy, cx, cy, height, width = self.intrinsic_fetcher[image_id]
 
@@ -312,13 +344,7 @@ class PredictionVisualizer:
         depth_raw = cv2.imread(str(scene.depth_path), cv2.IMREAD_UNCHANGED)
         color_np = np.asarray(color_raw, dtype=np.uint8)
         depth_np = np.asarray(depth_raw, dtype=np.uint16)
-
-        def normalize_rgb(raw_rgb):
-            float_rgb = np.array(raw_rgb).astype(np.float32) / 255.
-            float_rgb[..., 0] = (float_rgb[..., 0] - 0.485) / 0.229
-            float_rgb[..., 1] = (float_rgb[..., 1] - 0.456) / 0.224
-            float_rgb[..., 2] = (float_rgb[..., 2] - 0.406) / 0.225
-            return float_rgb
+        mask_invalid = depth_np == 0
 
         pcd, m, rx, ry = convert_pcd(raw_depth=depth_np, extrinsics=scene.extrinsics, fx=fx, fy=fy, cx=cx, cy=cy)
         rgb = normalize_rgb(raw_rgb=color_np)
@@ -326,23 +352,23 @@ class PredictionVisualizer:
         # xyzrgb[..., 1] *= -1.
         # xyzrgb[..., 2] *= -1.
 
-        new_xyz = xyzrgb[m, :]
-        from scipy import interpolate
-
-        new_rgb = np.zeros((height * 2, width * 2, 3), dtype=np.uint8)
-        xl, yl, rl, gl, bl = [], [], [], [], []
-        for i in range(new_xyz.shape[0]):
-            X, Y, Z = new_xyz[i, 0], new_xyz[i, 1], new_xyz[i, 2]
-            R, G, B = new_xyz[i, 5], new_xyz[i, 6], new_xyz[i, 7]
-            xx = X / Z * fx + cx
-            yy = Y / Z * fy + cy
-            if 0 <= xx < width * 2 and 0 <= yy < height * 2:
-                rr = int((R * 0.229 + 0.485) * 255)
-                gg = int((G * 0.224 + 0.456) * 255)
-                bb = int((B * 0.225 + 0.406) * 255)
-                new_rgb[int(yy), int(xx), :] = rr, gg, bb
-        plt.imshow(new_rgb)
-        plt.show()
+        # new_xyz = xyzrgb[m, :]
+        # from scipy import interpolate
+        #
+        # new_rgb = np.zeros((height * 2, width * 2, 3), dtype=np.uint8)
+        # xl, yl, rl, gl, bl = [], [], [], [], []
+        # for i in range(new_xyz.shape[0]):
+        #     X, Y, Z = new_xyz[i, 0], new_xyz[i, 1], new_xyz[i, 2]
+        #     R, G, B = new_xyz[i, 5], new_xyz[i, 6], new_xyz[i, 7]
+        #     xx = X / Z * fx + cx
+        #     yy = Y / Z * fy + cy
+        #     if 0 <= xx < width * 2 and 0 <= yy < height * 2:
+        #         rr = int((R * 0.229 + 0.485) * 255)
+        #         gg = int((G * 0.224 + 0.456) * 255)
+        #         bb = int((B * 0.225 + 0.406) * 255)
+        #         new_rgb[int(yy), int(xx), :] = rr, gg, bb
+        # plt.imshow(new_rgb)
+        # plt.show()
 
         new_pcd = o3d.geometry.PointCloud()
         new_pcd.points = o3d.utility.Vector3dVector(xyzrgb[..., :3][m, :])
@@ -388,7 +414,29 @@ class PredictionVisualizer:
 
         if self.verbose:
             o3d.visualization.draw_geometries(o3d_obj_list)
-        return xyzrgb, aabb_bbox_list
+        return xyzrgb, aabb_bbox_list, mask_invalid
+
+    def compute_depth_mask(self, image_id: str):
+        return np.asarray(cv2.imread(str(self.scene_by_image_id[image_id].depth_path), cv2.IMREAD_UNCHANGED),
+                          dtype=np.uint16) > 0
+
+    def extract_pcd_with_mask(self, image_id: str):
+        scene = self.scene_by_image_id[image_id]
+        fx, fy, cx, cy, height, width = self.intrinsic_fetcher[image_id]
+
+        color_raw = cv2.imread(str(scene.rgb_path), cv2.IMREAD_COLOR)
+        depth_raw = cv2.imread(str(scene.depth_path), cv2.IMREAD_UNCHANGED)
+        color_np = np.asarray(color_raw, dtype=np.uint8)
+        depth_np = np.asarray(depth_raw, dtype=np.uint16)
+        mask_valid = depth_np > 0
+
+        pcd, m, rx, ry = convert_pcd(raw_depth=depth_np, extrinsics=scene.extrinsics, fx=fx, fy=fy, cx=cx, cy=cy)
+        rgb = normalize_rgb(raw_rgb=color_np)
+        xyzrgb = np.concatenate((pcd, rx[..., np.newaxis], ry[..., np.newaxis], rgb), axis=-1)
+        xyzrgb[..., 1] *= -1
+        xyzrgb[..., 2] *= -1
+
+        return xyzrgb, mask_valid
 
     def compute_3d_bbox(self, uniq_id: str):
         image_id, object_id, anno_id = uniq_id.split('_')
@@ -466,6 +514,11 @@ class PredictionVisualizer:
             intrinsic=o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy, cx, cy))
         pcd.transform(Rt)
 
+        # pcd = o3d.geometry.PointCloud()
+        # points = np.load('/home/junha/Downloads/{}_pcd.npy'.format(image_id))
+        # mask = np.load('/home/junha/Downloads/{}_mask.npy'.format(image_id))
+        # pcd.points = o3d.utility.Vector3dVector(points[..., :3][mask, :])
+
         o3d_obj_list = []
         o3d_obj_list.append(pcd)
 
@@ -541,6 +594,22 @@ class PredictionVisualizer:
 
         o3d.visualization.draw_geometries(o3d_obj_list)
 
+    def visualize_pcd_and_gt_bbox(self, uniq_id: str):
+        image_id, object_id, anno_id = uniq_id.split('_')
+        cls_aabb_list = self.cls_aabb_list[image_id]
+
+        pcd = o3d.geometry.PointCloud()
+        points = np.load('/home/junha/data/sunrefer/xyzrgb/{}.npy'.format(image_id))
+        mask = np.load('/home/junha/data/sunrefer/xyzrgb/{}_mask.npy'.format(image_id))
+        pcd.points = o3d.utility.Vector3dVector(points[..., :3][mask, :])
+
+        o3d_obj_list = []
+        o3d_obj_list.append(pcd)
+        for cls, aabb in cls_aabb_list:
+            line_mesh = create_line_mesh_from_center_size(np.array(aabb))
+            o3d_obj_list += line_mesh.cylinder_segments
+        o3d.visualization.draw_geometries(o3d_obj_list)
+
 
 def create_xyzrgb_and_aabb():
     vis = PredictionVisualizer(
@@ -585,7 +654,13 @@ def test():
         mask_ratio=0.8)
 
     image_id = '002920'
-    xyzrgb, aabb_list = vis.extract_rgbxyz_pcd(image_id)
+    pcd, mask = vis.extract_pcd_with_mask(image_id)
+    tmp_dir = Path.home() / 'Downloads'
+    torch.save({'pcd': pcd, 'mask': mask}, str(tmp_dir / '{}.pt'.format(image_id)))
+    # np.save(str(tmp_dir / '{}_pcd.npy'.format(image_id)), pcd)
+    # np.save(str(tmp_dir / '{}_mask.npy'.format(image_id)), mask)
+    print(pcd.shape)
+    print(mask.shape)
 
 
 def create_aabb_from_bbox_3d(bbox_3d, center_size: bool):
@@ -735,9 +810,29 @@ def compute_3d_to_2d_projection():
 if __name__ == '__main__':
     # test()
     # visualize_annotation('000001', 0)
-    compute_3d_to_2d_projection()
+    # compute_3d_to_2d_projection()
     # compute_average_iou(aabb=True,
     #                     use_seg_out_mask=True,
     #                     bbox_2d_ratio=1.0,
     #                     pcd_th_ratio=0.1,
     #                     mask_ratio=0.8)
+    # visualize_annotation(image_id='002920', anno_idx=0)
+    # test()
+    vis = PredictionVisualizer(
+        aabb=False,
+        highlight=True,
+        apply_seg_out_mask=True,
+        verbose=True,
+        bbox_2d_ratio=1.0,
+        pcd_th_ratio=0,
+        mask_ratio=0.8)
+    image_id = '002920'
+    vis.visualize_pcd_and_gt_bbox('{}_1_0'.format(image_id))
+    # for i in tqdm(range():
+    #     image_id = '{:06d}'.format(i)
+        # mask = vis.compute_depth_mask(image_id)
+        # pcd_dir = Path.home() / 'data/sunrefer/xyzrgb'
+        # np.save(str(tmp_dir / '{}_pcd.npy'.format(image_id)), pcd)
+        # np.save(str(pcd_dir / '{}_mask.npy'.format(image_id)), mask)
+        # torch.save({'pcd': pcd, 'mask': mask}, str(tmp_dir / '{}.pt'.format(image_id)))
+        # vis.visualize_pcd_and_gt_bbox('{}_1_0'.format(image_id))

@@ -424,7 +424,7 @@ class SceneInformation:
             return Path()
 
 
-def fetch_scene_object_by_image_id() -> Dict[str, SceneInformation]:
+def fetch_scene_object_by_image_id_revised() -> Dict[str, SceneInformation]:
     converted_scene_info_path = Path('/home/junha/data/sunrefer/meta.pt')
     if converted_scene_info_path.exists():
         converted_scene_info_by_image_id = torch.load(str(converted_scene_info_path))
@@ -487,7 +487,7 @@ def compute_2d_3d_bbox_correspondences():
     MIN_NUM_POINTS = 20
     MIN_INLIER_RATIO = 0.2
 
-    scene_object_by_image_id = fetch_scene_object_by_image_id()
+    scene_object_by_image_id = fetch_scene_object_by_image_id_revised()
     bbox3d_by_image_id: Dict[str, List[Tuple[str, List[float]]]] = json.load(open(str(fetch_xyzrgb_bbox_path()), 'r'))
     obj_pair_list = []
     for image_id, aabb_list in tqdm(list(bbox3d_by_image_id.items())):
@@ -581,6 +581,52 @@ def create_masks():
         np.save(str('/home/junha/data/sunrefer/xyzrgb/mask{}.npy'.format(image_id)), mask)
 
 
+def compute_iou_from_gt_3d_bbox():
+    pred_bbox_by_image_id = fetch_predicted_bbox_by_image_id()
+    scene_by_image_id = fetch_scene_object_by_image_id_revised()
+    aabb_list_by_image_id = json.load(open(str(fetch_xyzrgb_bbox_path()), 'r'))
+    anno_dict = json.load(open(str(fetch_sunrefer_anno_path()), 'r'))
+    iou_list = []
+    for image_id, pred_bbox_list in tqdm(pred_bbox_by_image_id.items()):
+        scene = scene_by_image_id[image_id]
+        aabb_list = aabb_list_by_image_id[image_id]
+        pcd = np.load(str(fetch_xyzrgb_pcd_path(image_id)))  # H, W, 8
+        mask = np.load(str(fetch_xyzrgb_mask_path(image_id)))  # H, W
+        for uniq_id, bbox_2d in pred_bbox_list:
+            _, object_id, anno_id = uniq_id.split('_')
+            image_object_id = '{}_{}'.format(image_id, object_id)
+            gt_class_name = anno_dict[image_object_id]['object_name']
+            object_id = int(object_id)
+            x, y, w, h = list(map(int, bbox_2d))
+            x = max(0, min(scene.width - 1, x))
+            y = max(0, min(scene.height - 1, y))
+            w = max(0, min(scene.width, w))
+            h = max(0, min(scene.height, h))
+            mask_crop = mask[y:y + h, x:x + w]
+            pcd_crop = pcd[y:y + h, x:x + w, :]
+            pcd_crop = pcd_crop[~mask_crop, :]  # N, 8
+
+            irl = [(inlier_ratio_from_pcd_and_aabb(pcd_crop, aabb), class_name, aabb) for class_name, aabb in aabb_list]
+            irl = sorted(irl, key=lambda x: x[0], reverse=True)
+            _, prd_class_name, prd_bbox_3d = irl[0]
+            _, tgt_bbox_3d = aabb_list[object_id]
+            prd_bbox_3d = torch.tensor(prd_bbox_3d)
+            tgt_bbox_3d = torch.tensor(tgt_bbox_3d)
+            iou, _ = compute_iou(tgt_bbox_3d[:3], tgt_bbox_3d[3:], prd_bbox_3d[:3], prd_bbox_3d[3:])
+            iou_list.append(iou.item())
+            # print('tgt_class: {}'.format(gt_class_name))
+            # print('prd_class: {}'.format(pred_class_name))
+            # print('tgt_bbox: {}'.format(aabb_list[object_id]))
+            # print('prd_bbox: {}'.format(pred_bbox_3d))
+        # break
+
+    iou = np.array(iou_list)
+    print('number of predictions: {}'.format(iou.shape[0]))
+    print('mean iou: {:5.3f}'.format(np.mean(iou) * 100.))
+    print('acc@0.25: {:5.3f}'.format(np.sum(iou > 0.25) / iou.shape[0] * 100.))
+    print('acc@0.5 : {:5.3f}'.format(np.sum(iou > 0.5) / iou.shape[0] * 100.))
+
+
 if __name__ == '__main__':
     # visualize_2d_bbox('000951')
     # detect_wall_and_floor('002920')
@@ -597,7 +643,8 @@ if __name__ == '__main__':
     # compute_2d_3d_bbox_correspondences()
     # test_2d_3d_bbox_correspondences()
     # compute_2d_3d_bbox_correspondences()
-    dataset = BoundingBoxCorrespondenceDataset(num_points=1000)
-    for pcd, bbox in tqdm(dataset):
-        pass
+    # dataset = BoundingBoxCorrespondenceDataset(num_points=1000)
+    # for pcd, bbox in tqdm(dataset):
+    #     pass
     # create_masks()
+    compute_iou_from_gt_3d_bbox()

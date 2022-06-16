@@ -16,7 +16,7 @@ def fetch_predicted_bbox_by_uniq_id():
 
 def fetch_predicted_bbox_by_image_id():
     with open(str(fetch_ofa_predict_path()), 'r') as file:
-        pred_data = json.load(file)
+        pred_data = sorted(json.load(file), key=lambda x:x['uniq_id'])
     pred_bbox_by_image_id = defaultdict(list)
     for pred_item in pred_data:
         uniq_id = pred_item['uniq_id']

@@ -39,7 +39,7 @@ def fetch_xyzrgb_pcd_path(image_id: str) -> Path:
 
 
 def fetch_xyzrgb_mask_path(image_id: str) -> Path:
-    return _ensure_exists(fetch_xyzrgb_dir() / 'mask{}.npy'.format(image_id))
+    return _ensure_exists(fetch_xyzrgb_dir() / '{}_mask.npy'.format(image_id))
 
 
 def fetch_xyzrgb_bbox_path() -> Path:
@@ -72,6 +72,10 @@ def fetch_segformer_path(image_id: str) -> Path:
 
 def fetch_object_2d_3d_path() -> Path:
     return _ensure_file_exists('object_2d_3d.json')
+
+
+def fetch_object_pair_path() -> Path:
+    return _ensure_file_exists('obj_pair_info.json')
 
 
 def fetch_sunrefer_anno_path() -> Path:
