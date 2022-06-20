@@ -462,13 +462,17 @@ class PredictionVisualizer:
         pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
             image=rgbd_image,
             intrinsic=o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy, cx, cy))
-        pcd.transform(Rt)
+        # pcd.transform(Rt)
 
         o3d_obj_list = []
         o3d_obj_list.append(pcd)
 
-        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.6, origin=[0, 0, 0])
-        o3d_obj_list.append(coord_frame)
+        coord_frame_orig = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.6, origin=[0, 0, 0])
+        coord_frame_revised = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.6, origin=[0, 0, 0])
+        coord_frame_revised.transform(np.linalg.inv(Rt))
+
+        o3d_obj_list.append(coord_frame_orig)
+        o3d_obj_list.append(coord_frame_revised)
 
         for oid, bbox_3d in enumerate(scene.gt_3d_bbox):
             # class_name = bbox_3d.class_name[0]  # str
@@ -484,6 +488,8 @@ class PredictionVisualizer:
                 radius = 0.015
 
             line_mesh = create_line_mesh(centroid, basis, coeffs, aabb=self.aabb, color=color, radius=radius)
+            for s in line_mesh.cylinder_segments:
+                s.transform(np.linalg.inv(Rt))
             o3d_obj_list += line_mesh.cylinder_segments
         o3d.visualization.draw_geometries(o3d_obj_list)
 
