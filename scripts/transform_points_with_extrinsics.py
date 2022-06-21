@@ -1,22 +1,38 @@
 import json
-import time
 from math import isnan
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Union, Any, Dict
+from typing import Union, Any, Dict, List, Tuple
 
 import numpy as np
-import cv2
 import open3d as o3d
-import open3d.visualization.rendering as rendering
 import torch
+from scipy.interpolate import griddata
 from tqdm import tqdm
 
-from scripts.compute_iou import create_line_mesh_from_center_size
 from utils.directory import fetch_intrinsic_from_tag_path
-from utils.meta_io import fetch_scene_object_by_image_id, MetaObjectBase
 from utils.intrinsic_fetcher import IntrinsicFetcher
-from scipy.interpolate import griddata
+from utils.line_mesh import LineMesh
+from utils.meta_io import MetaObjectBase
+
+
+def create_line_mesh_from_center_size(
+        center_size: np.ndarray,
+        color: Union[List[int], Tuple[int, int, int]] = (1, 0, 0),
+        radius: float = 0.015):
+    LINES = [[0, 1], [0, 2], [1, 3], [2, 3], [4, 5], [4, 6], [5, 7], [6, 7], [0, 4], [1, 5], [2, 6], [3, 7]]
+    center, hsz = center_size[:3], center_size[3:6] * 0.5
+    points = [[-hsz[0], -hsz[1], -hsz[2]],
+              [+hsz[0], -hsz[1], -hsz[2]],
+              [-hsz[0], +hsz[1], -hsz[2]],
+              [+hsz[0], +hsz[1], -hsz[2]],
+              [-hsz[0], -hsz[1], +hsz[2]],
+              [+hsz[0], -hsz[1], +hsz[2]],
+              [-hsz[0], +hsz[1], +hsz[2]],
+              [+hsz[0], +hsz[1], +hsz[2]]]
+    line_mesh = LineMesh(points, lines=LINES, colors=color, radius=radius)
+    line_mesh.translate(center)
+    return line_mesh
 
 
 with open(str(fetch_intrinsic_from_tag_path()), 'r') as file:

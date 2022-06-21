@@ -1,13 +1,12 @@
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Tuple, List, Union
+from typing import Dict, List
 
 import cv2
 import numpy as np
 import scipy.io
 
 from utils.directory import fetch_official_sunrgbd_dir, fetch_meta_v1_path, fetch_meta_2d_path, fetch_meta_3d_path
-
 
 CL = [[-1, -1, -1],
       [1, -1, -1],
