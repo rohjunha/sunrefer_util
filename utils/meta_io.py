@@ -1,6 +1,6 @@
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Union
 
 import cv2
 import numpy as np
@@ -96,7 +96,7 @@ class MetaObjectBase:
         assert self.seg_path.exists()
 
     def __repr__(self):
-        return 'seq_name: {}'.format(self.seq_root.stem)
+        return 'seq_name: {}'.format(self.seq_root)
 
     @property
     def depth_path(self) -> Path:
@@ -143,6 +143,13 @@ class MetaObjectBase:
             if seg_sum > 0:
                 data.append((i, name, seg_image * 255, seg_sum / (w * h), seg_sum / np.sum(seg_image)))
         return data
+
+    def load_rgb(self):
+        return np.asarray(cv2.cvtColor(cv2.imread(str(self.rgb_path), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB),
+                          dtype=np.uint8)
+
+    def load_depth(self):
+        return np.asarray(cv2.imread(str(self.depth_path), cv2.IMREAD_UNCHANGED), dtype=np.uint16)
 
 
 def draw_bbox_and_text(image, bbox):
