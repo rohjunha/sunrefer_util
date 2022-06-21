@@ -10,7 +10,7 @@ import torch
 from scipy.interpolate import griddata
 from tqdm import tqdm
 
-from utils.directory import fetch_intrinsic_from_tag_path
+from utils.directory import fetch_intrinsic_from_tag_path, fetch_segformer_path
 from utils.intrinsic_fetcher import IntrinsicFetcher
 from utils.line_mesh import LineMesh
 from utils.meta_io import MetaObjectBase
@@ -124,6 +124,92 @@ def pcd_from_depth(depth: np.array, fx, fy, cx, cy):
     return pcd, m, rx, ry
 
 
+SCENE_BY_IMAGE_ID = {k: SceneInformation(v) for k, v in torch.load(str(Path.home() / 'data/sunrefer/meta.pt')).items()}
+OUT_DIR = Path.home() / 'data/sunrefer/xyzrgb_extrinsic'
+
+
+def create_pcd_with_extrinsic(image_id: str):
+    pcd_path = OUT_DIR / '{}.npy'.format(image_id)
+    rgb_path = OUT_DIR / '{}.jpg'.format(image_id)
+    intrinsic_path = OUT_DIR / '{}.json'.format(image_id)
+
+    # if pcd_path.exists():
+    #     return
+
+    scene: SceneInformation = SCENE_BY_IMAGE_ID[image_id]
+    rgb = scene.load_rgb()
+    pcd, mask, rx, ry = scene.load_pcd(apply_extrinsics=True)
+
+    seg_out = np.load(str(fetch_segformer_path(image_id)))
+    seg_mask = np.ones(seg_out.shape, dtype=bool)
+    for label in [0, 3, 5]:
+        seg_mask[seg_out == label] = False
+
+    mask_nz = np.logical_and(np.abs(pcd[..., 2]) > 1e-6, seg_mask)
+    if np.sum(mask_nz) < 10000:
+        mask_nz = np.abs(pcd[..., 2]) > 1e-6
+    px = scene.fx * pcd[mask_nz, 0] / pcd[mask_nz, 2] + scene.cx
+    py = scene.fy * pcd[mask_nz, 1] / pcd[mask_nz, 2] + scene.cy
+    sampled_x = np.reshape(px, (-1,))
+    sampled_y = np.reshape(py, (-1,))
+
+    offset_x = round(-np.min(sampled_x)) if np.min(sampled_x) < 0 else 0
+    offset_y = round(-np.min(sampled_y)) if np.min(sampled_y) < 0 else 0
+    size_x = min(2000, round(np.max(sampled_x)))
+    size_y = min(2000, round(np.max(sampled_y)))
+
+    width = size_x + offset_x
+    height = size_y + offset_y
+    cx = scene.cx + (-np.min(sampled_x) if np.min(sampled_x) < 0 else 0.)
+    cy = scene.cy + (-np.min(sampled_y) if np.min(sampled_y) < 0 else 0.)
+
+    if width > 1000 or height > 1000:
+        width = pcd.shape[1] + offset_x
+        height = pcd.shape[0] + offset_y
+        # width, height = pcd.shape[1], pcd.shape[0]
+        # cx, cy = scene.cx, scene.cy
+
+    intrinsics = {'width': width, 'height': height, 'cx': cx, 'cy': cy, 'fx': scene.fx, 'fy': scene.fy}
+    print(image_id, intrinsics)
+
+    sampled_mask = np.zeros((height, width), dtype=bool)
+    sampled_rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    sampled_depth = np.zeros((height, width), dtype=np.float32)
+
+    xx_ = scene.fx * pcd[..., 0] / pcd[..., 2] + cx
+    yy_ = scene.fy * pcd[..., 1] / pcd[..., 2] + cy
+    mm = np.logical_and(~np.isnan(xx_), ~np.isnan(yy_))
+    xx = np.round(xx_).astype(dtype=np.int32)
+    yy = np.round(yy_).astype(dtype=np.int32)
+    grid_x, grid_y = np.meshgrid(
+        np.linspace(0, pcd.shape[1] - 1, pcd.shape[1]),
+        np.linspace(0, pcd.shape[0] - 1, pcd.shape[0]))
+    grid_x = grid_x.astype(dtype=np.int32)
+    grid_y = grid_y.astype(dtype=np.int32)
+    xx = xx[mm]
+    yy = yy[mm]
+    grid_x = grid_x[mm]
+    grid_y = grid_y[mm]
+    mm = (0 <= xx) & (xx < width) & (0 <= yy) & (yy < height)
+    xx = xx[mm]
+    yy = yy[mm]
+    grid_x = grid_x[mm]
+    grid_y = grid_y[mm]
+
+    sampled_rgb[yy, xx, :] = rgb[grid_y, grid_x, :]
+    sampled_mask[yy, xx] = True
+    sampled_depth[yy, xx] = pcd[grid_y, grid_x, 2]
+
+    pcd, mask, rx, ry = pcd_from_depth(sampled_depth, scene.fx, scene.fy, cx, cy)
+    xyzrgb = np.concatenate((pcd, rx[..., np.newaxis], ry[..., np.newaxis], normalize_rgb(sampled_rgb)), axis=-1)
+    xyzrgb[~mask, :] = 0.
+
+    np.save(str(pcd_path), xyzrgb.astype(dtype=np.float32))
+    o3d.io.write_image(str(rgb_path), o3d.geometry.Image(sampled_rgb))
+    with open(str(intrinsic_path), 'w') as file:
+        json.dump(intrinsics, file, indent=4)
+
+
 class SunReferDataset:
     def __init__(self,
                  out_dir: Path = Path.home() / 'data/sunrefer/xyzrgb_extrinsic',
@@ -135,13 +221,19 @@ class SunReferDataset:
         self.interp = interp
         self.out_dir = out_dir
 
+    def load_segformer_mask(self, image_id: str):
+        seg_out = np.load(str(fetch_segformer_path(image_id)))
+        seg_mask = np.ones(seg_out.shape, dtype=bool)
+        for label in [0, 3, 5]:
+            seg_mask[seg_out == label] = False
+        return seg_mask
+
     def render_rgb_from_points(self, image_id: str):
         scene: SceneInformation = self.scene_by_image_id[image_id]
         rgb = scene.load_rgb()
         pcd, mask, rx, ry = scene.load_pcd(apply_extrinsics=True)
         # print('pcd loaded')
-
-        mask_nz = np.abs(pcd[..., 2]) > 1e-6
+        mask_nz = np.logical_and(np.abs(pcd[..., 2]) > 1e-6, self.load_segformer_mask(image_id))
         px = scene.fx * pcd[mask_nz, 0] / pcd[mask_nz, 2] + scene.cx
         py = scene.fy * pcd[mask_nz, 1] / pcd[mask_nz, 2] + scene.cy
         sampled_x = np.reshape(px, (-1,))
@@ -153,7 +245,6 @@ class SunReferDataset:
 
         offset_x = round(-np.min(sampled_x)) if np.min(sampled_x) < 0 else 0
         offset_y = round(-np.min(sampled_y)) if np.min(sampled_y) < 0 else 0
-
         size_x = round(np.max(sampled_x))
         size_y = round(np.max(sampled_y))
 
@@ -161,10 +252,18 @@ class SunReferDataset:
         height = size_y + offset_y
         cx = scene.cx + (-np.min(sampled_x) if np.min(sampled_x) < 0 else 0.)
         cy = scene.cy + (-np.min(sampled_y) if np.min(sampled_y) < 0 else 0.)
+
+        # if width > 1000 or height > 1000:
+        #     width = pcd.shape[1]
+        #     height = pcd.shape[0]
+        #     size_x = width
+        #     size_y = height
+        #     offset_x = 0
+        #     offset_y = 0
+        #     cx = scene.cx
+        #     cy = scene.cy
+
         intrinsics = {'width': width, 'height': height, 'cx': cx, 'cy': cy, 'fx': scene.fx, 'fy': scene.fy}
-        # print('dimension determined')
-        # print(intrinsics)
-        # print(np.min(sampled_x), np.min(sampled_y))
 
         if self.interp:
             grid_x, grid_y = np.meshgrid(
@@ -192,30 +291,57 @@ class SunReferDataset:
             sampled_mask = np.zeros((height, width), dtype=bool)
             sampled_rgb = np.zeros((height, width, 3), dtype=np.uint8)
             sampled_depth = np.zeros((height, width), dtype=np.float32)
-            for rr in range(pcd.shape[0]):
-                for cc in range(pcd.shape[1]):
-                    zz_ = pcd[rr, cc, 2]
-                    if abs(zz_) < 1e-5:
-                        continue
-                    xx_ = scene.fx * pcd[rr, cc, 0] / zz_ + (scene.cx + offset_x)
-                    yy_ = scene.fy * pcd[rr, cc, 1] / zz_ + (scene.cy + offset_y)
-                    if isnan(xx_) or isnan(yy_):
-                        continue
 
-                    xx = int(xx_)
-                    yy = int(yy_)
-                    if 0 <= xx < sampled_rgb.shape[1] and 0 <= yy < sampled_rgb.shape[0]:
-                        sampled_rgb[yy, xx, :] = rgb[rr, cc, :]
-                        sampled_mask[yy, xx] = True
-                        sampled_depth[yy, xx] = zz_
+            xx_ = scene.fx * pcd[..., 0] / pcd[..., 2] + cx
+            yy_ = scene.fy * pcd[..., 1] / pcd[..., 2] + cy
+            mm = np.logical_and(~np.isnan(xx_), ~np.isnan(yy_))
+            xx = np.round(xx_).astype(dtype=np.int32)
+            yy = np.round(yy_).astype(dtype=np.int32)
+            grid_x, grid_y = np.meshgrid(
+                np.linspace(0, pcd.shape[1] - 1, pcd.shape[1]),
+                np.linspace(0, pcd.shape[0] - 1, pcd.shape[0]))
+            grid_x = grid_x.astype(dtype=np.int32)
+            grid_y = grid_y.astype(dtype=np.int32)
+            xx = xx[mm]
+            yy = yy[mm]
+            grid_x = grid_x[mm]
+            grid_y = grid_y[mm]
+            mm = (0 <= xx) & (xx < width) & (0 <= yy) & (yy < height)
+            xx = xx[mm]
+            yy = yy[mm]
+            grid_x = grid_x[mm]
+            grid_y = grid_y[mm]
+
+            sampled_rgb[yy, xx, :] = rgb[grid_y, grid_x, :]
+            sampled_mask[yy, xx] = True
+            sampled_depth[yy, xx] = pcd[grid_y, grid_x, 2]
+
+            # for rr in range(pcd.shape[0]):
+            #     for cc in range(pcd.shape[1]):
+            #         zz_ = pcd[rr, cc, 2]
+            #         if abs(zz_) < 1e-5:
+            #             continue
+            #         xx_ = scene.fx * pcd[rr, cc, 0] / zz_ + (scene.cx + offset_x)
+            #         yy_ = scene.fy * pcd[rr, cc, 1] / zz_ + (scene.cy + offset_y)
+            #         if isnan(xx_) or isnan(yy_):
+            #             continue
+            #
+            #         xx = int(xx_)
+            #         yy = int(yy_)
+            #         if 0 <= xx < sampled_rgb.shape[1] and 0 <= yy < sampled_rgb.shape[0]:
+            #             sampled_rgb[yy, xx, :] = rgb[rr, cc, :]
+            #             sampled_mask[yy, xx] = True
+            #             sampled_depth[yy, xx] = zz_
 
         pcd, mask, rx, ry = pcd_from_depth(sampled_depth, scene.fx, scene.fy, cx, cy)
         xyzrgb = np.concatenate((pcd, rx[..., np.newaxis], ry[..., np.newaxis], normalize_rgb(sampled_rgb)), axis=-1)
         xyzrgb[~mask, :] = 0.
 
         pcd_path = self.out_dir / '{}.npy'.format(image_id)
+        rgb_path = self.out_dir / '{}.jpg'.format(image_id)
         intrinsic_path = self.out_dir / '{}.json'.format(image_id)
         np.save(str(pcd_path), xyzrgb.astype(dtype=np.float32))
+        o3d.io.write_image(str(rgb_path), o3d.geometry.Image(sampled_rgb))
         with open(str(intrinsic_path), 'w') as file:
             json.dump(intrinsics, file, indent=4)
 
@@ -235,6 +361,12 @@ class SunReferDataset:
         pcd2 = o3d.geometry.PointCloud()
         pcd2.points = o3d.utility.Vector3dVector(pcd2_[mask2, :])
         o3d.io.write_point_cloud('pcd2.ply', pcd2)
+
+    def visualize_pcd(self, image_id: str):
+        pcd_path = self.out_dir / '{}.npy'.format(image_id)
+        pcd = np.load(str(pcd_path))
+        rgb = denormalize_rgb(pcd[..., -3:])
+        o3d.io.write_image('vis{}.png'.format(image_id), o3d.geometry.Image(rgb))
 
 
 def visualize_ply_files():
@@ -262,12 +394,16 @@ def visualize_ply_files():
 
 if __name__ == '__main__':
     # visualize_ply_files()
-    dataset = SunReferDataset(interp=False)
-    image_id_list = ['{:06d}'.format(i) for i in range(1, 10336)]
+    # dataset = SunReferDataset(interp=False)
 
-    pool = Pool(12)
+    # dataset.render_rgb_from_points('001213')
+    # dataset.visualize_pcd('001213')
+
+    # image_id_list = ['{:06d}'.format(i) for i in range(1, 10336)]
+    image_id_list = ['002803', '003654', '003701', '004131', '004281', '004767', '009566', '009587', '010079', '010199']
+    pool = Pool(20)
     result_list_tqdm = []
-    for result in tqdm(pool.imap_unordered(dataset.render_rgb_from_points, image_id_list), total=len(image_id_list)):
+    for result in tqdm(pool.imap(create_pcd_with_extrinsic, image_id_list), total=len(image_id_list)):
         pass
 
     # iou_by_uniq_id = {k: v for k, v in result_list_tqdm}
