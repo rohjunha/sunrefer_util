@@ -1,10 +1,12 @@
 import json
+from multiprocessing import Pool
 from pathlib import Path
 from shutil import copyfile
 
 import cv2
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from scripts.compute_iou import create_line_mesh_from_center_size
 from utils.intrinsic_fetcher import IntrinsicFetcher
@@ -51,6 +53,15 @@ def denormalize_rgb(float_rgb):
     return np.stack((r, g, b), axis=-1).astype(np.uint8)
 
 
+def fetch_raw_rgb(image_id: str):
+    raw_bgr = cv2.imread('/home/junha/data/sunrefer/rgb/{}.jpg'.format(image_id), cv2.IMREAD_COLOR)
+    return cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB)
+
+
+def fetch_raw_depth(image_id: str):
+    return cv2.imread('/home/junha/data/sunrefer/raw_depth/{}.png'.format(image_id), cv2.IMREAD_UNCHANGED)
+
+
 class TransformManager:
     def __init__(self):
         self.meta_dict = torch.load('/home/junha/data/sunrefer/meta.pt')
@@ -58,17 +69,10 @@ class TransformManager:
         self.scene_by_image_id = fetch_scene_object_by_image_id('v2_3d')
         self.aabb_dict = json.load(open('/home/junha/data/sunrefer/xyzrgb/aabb.json', 'r'))
 
-    def fetch_raw_rgb(self, image_id: str):
-        raw_bgr = cv2.imread('/home/junha/data/sunrefer/rgb/{}.jpg'.format(image_id), cv2.IMREAD_COLOR)
-        return cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB)
-
-    def fetch_raw_depth(self, image_id: str):
-        return cv2.imread('/home/junha/data/sunrefer/raw_depth/{}.png'.format(image_id), cv2.IMREAD_UNCHANGED)
-
     def fetch_original_pcd(self, image_id: str):
         fx, fy, cx, cy, h, w = self.intrinsic_fetcher[image_id]
         E = np.array(self.meta_dict[image_id]['E'], dtype=np.float32)
-        raw_depth = self.fetch_raw_depth(image_id)
+        raw_depth = fetch_raw_depth(image_id)
         float_depth = convert_depth_float_from_uint8(raw_depth)
         pcd, mask, rx, ry = unproject(float_depth, fx, fy, cx, cy)
         return transform(pcd, E), mask, rx, ry
@@ -100,7 +104,7 @@ class TransformManager:
         intrinsic = {'width': width, 'height': height, 'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy,
                      'H': np.reshape(T, -1).tolist()}
 
-        raw_depth = self.fetch_raw_depth(image_id)
+        raw_depth = fetch_raw_depth(image_id)
         float_depth = convert_depth_float_from_uint8(raw_depth)
         mask = float_depth > 0
 
@@ -131,7 +135,7 @@ class TransformManager:
         cx += offset_x
         cy += offset_y
 
-        raw_rgb = normalize_rgb(self.fetch_raw_rgb(image_id))
+        raw_rgb = normalize_rgb(fetch_raw_rgb(image_id))
         pcd_orig, mask_orig, _, _ = self.fetch_original_pcd(image_id)
 
         sampled_mask = np.zeros((height, width), dtype=bool)
@@ -171,8 +175,6 @@ class TransformManager:
 
         intrinsic = {'width': width, 'height': height, 'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy,
                      'offset_x': offset_x, 'offset_y': offset_y, 'H': np.reshape(T, -1).tolist()}
-        print(intrinsic)
-
         return data, intrinsic
 
     def fetch_pixel_depth(self, image_id: str):
@@ -186,16 +188,25 @@ class TransformManager:
         p2 = T @ p1
         p2 = np.divide(p2[:2, :], np.tile(p2[-1, :], (2, 1)))
 
-        offset_x = -np.min(p2[0, :])
-        offset_y = -np.min(p2[1, :])
-        p2[0, :] += offset_x
-        p2[1, :] += offset_y
-        width = min(2000, int(round(np.max(p2[0, :]))))
-        height = min(2000, int(round(np.max(p2[1, :]))))
+        p2x = p2[0, np.abs(p2[0, :]) < 5000]
+        p2y = p2[1, np.abs(p2[1, :]) < 5000]
+        offset_x = -np.min(p2x)
+        offset_y = -np.min(p2y)
+        p2x += offset_x
+        p2y += offset_y
+        width = min(3000, int(round(np.max(p2x))))
+        height = min(3000, int(round(np.max(p2y))))
+
+        if offset_x > 2000 or offset_y > 2000:
+            data = np.zeros((h, w, 7), dtype=np.float32)
+            intrinsic = {'width': w, 'height': h, 'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy,
+                         'offset_x': 0., 'offset_y': 0., 'H': np.eye(3, dtype=np.float32).tolist()}
+            return data, intrinsic
+
         cx += offset_x
         cy += offset_y
 
-        raw_rgb = normalize_rgb(self.fetch_raw_rgb(image_id))
+        raw_rgb = normalize_rgb(fetch_raw_rgb(image_id))
         pcd_orig, mask_orig, _, _ = self.fetch_original_pcd(image_id)
 
         sampled_mask = np.zeros((height, width), dtype=bool)
@@ -225,17 +236,16 @@ class TransformManager:
         sampled_mask[yy, xx] = True
         sampled_depth[yy, xx] = pcd_orig[grid_y, grid_x, 2]
         sampled_rgb[yy, xx, :] = raw_rgb[grid_y, grid_x, :]
-        mask = sampled_depth > 0
         rx = np.linspace(0., 1., sampled_depth.shape[1], dtype=np.float32)
         ry = np.linspace(0., 1., sampled_depth.shape[0], dtype=np.float32)
         rx, ry = np.meshgrid(rx, ry)
 
         depth_ = sampled_depth[..., np.newaxis]
-        mask_ = mask[..., np.newaxis].astype(dtype=np.float32)
+        mask_ = sampled_mask[..., np.newaxis].astype(dtype=np.float32)
         rx_ = rx[..., np.newaxis]
         ry_ = ry[..., np.newaxis]
         data = np.concatenate((depth_, rx_, ry_, sampled_rgb, mask_), axis=-1)
-        data[~mask, :] = 0.
+        data[~sampled_mask, :] = 0.
 
         intrinsic = {'width': width, 'height': height, 'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy,
                      'offset_x': offset_x, 'offset_y': offset_y, 'H': np.reshape(T, -1).tolist()}
@@ -256,6 +266,8 @@ class TransformManager:
         # pcd3, mask3 = pcd3_[..., :3], pcd3_[..., -1] > 1e-5
 
         data3, intrinsic = self.fetch_pixel_depth(image_id)
+        print(np.sum(data3))
+        print(intrinsic)
         pcd3, mask3, _, _ = unproject(data3[..., 0], intrinsic['fx'], intrinsic['fy'], intrinsic['cx'], intrinsic['cy'])
 
         pcd4 = self.fetch_saved_pcd(image_id)
@@ -287,28 +299,27 @@ class TransformManager:
         o3d.visualization.draw_geometries(obj_list)
 
 
-def pcd_from_depth(raw_depth, E, fx, fy, cx, cy):
-    if raw_depth.dtype == np.uint16:
-        depth = np.bitwise_or(np.right_shift(raw_depth, 3), np.left_shift(raw_depth, 13)).astype(np.float32) / 1000.
-        depth[depth > 7.0] = 0.
-    else:
-        depth = raw_depth
-    mask = depth > 0
-    mx = np.linspace(0, depth.shape[1] - 1, depth.shape[1], dtype=np.float32)
-    my = np.linspace(0, depth.shape[0] - 1, depth.shape[0], dtype=np.float32)
-    rx = np.linspace(0., 1., depth.shape[1], dtype=np.float32)
-    ry = np.linspace(0., 1., depth.shape[0], dtype=np.float32)
-    rx, ry = np.meshgrid(rx, ry)
-    xx, yy = np.meshgrid(mx, my)
-    xx = (xx - cx) * depth / fx
-    yy = (yy - cy) * depth / fy
-    pcd = np.stack((xx, yy, depth), axis=-1)
-    if E is not None:
-        pcd = pcd @ np.transpose(E)
-    return pcd, mask, rx, ry
+meta_dict = torch.load('/home/junha/data/sunrefer/meta.pt')
+intrinsic_fetcher = IntrinsicFetcher()
+scene_by_image_id = fetch_scene_object_by_image_id('v2_3d')
+aabb_dict = json.load(open('/home/junha/data/sunrefer/xyzrgb/aabb.json', 'r'))
+out_dir = Path.home() / 'data/sunrefer/xyzrgb_concise'
 
 
-def estimate_homography_from_extrinsic(image_id: str):
+def fetch_original_pcd(image_id: str):
+    fx, fy, cx, cy, h, w = intrinsic_fetcher[image_id]
+    E = np.array(meta_dict[image_id]['E'], dtype=np.float32)
+    raw_depth = fetch_raw_depth(image_id)
+    float_depth = convert_depth_float_from_uint8(raw_depth)
+    pcd, mask, rx, ry = unproject(float_depth, fx, fy, cx, cy)
+    return transform(pcd, E), mask, rx, ry
+
+
+def fetch_pixel_depth(image_id: str):
+    out_rgb_path = out_dir / '{}.jpg'.format(image_id)
+    out_depth_path = out_dir / '{}.png'.format(image_id)
+    out_intrinsic_path = out_dir / '{}.json'.format(image_id)
+
     fx, fy, cx, cy, h, w = intrinsic_fetcher[image_id]
     K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
     E = np.array(meta_dict[image_id]['E'], dtype=np.float32)
@@ -319,124 +330,324 @@ def estimate_homography_from_extrinsic(image_id: str):
     p2 = T @ p1
     p2 = np.divide(p2[:2, :], np.tile(p2[-1, :], (2, 1)))
 
-    offset_x = -np.min(p2[0, :])
-    offset_y = -np.min(p2[1, :])
+    p2x = p2[0, np.abs(p2[0, :]) < 5000]
+    p2y = p2[1, np.abs(p2[1, :]) < 5000]
+    offset_x = -np.min(p2x)
+    offset_y = -np.min(p2y)
+    p2x += offset_x
+    p2y += offset_y
+    width = min(3000, int(round(np.max(p2x))))
+    height = min(3000, int(round(np.max(p2y))))
 
-    # p2[0, :] += offset_x
-    # p2[1, :] += offset_y
-    width = min(2000, int(round(np.max(p2[0, :]))))
-    height = min(2000, int(round(np.max(p2[1, :]))))
+    if offset_x > 2000 or offset_y > 2000:
+        out_rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        out_depth = np.zeros((h, w), dtype=np.uint16)
+        out_intrinsic = {'width': w, 'height': h, 'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy,
+                         'offset_x': 0., 'offset_y': 0., 'H': np.eye(3, dtype=np.float32).tolist()}
+        cv2.imwrite(str(out_rgb_path), out_rgb)
+        cv2.imwrite(str(out_depth_path), out_depth)
+        with open(str(out_intrinsic_path), 'w') as file:
+            json.dump(out_intrinsic, file)
 
-    # translate the homography w.r.t the offset.
-    # T[0, 2] += offset_x
-    # T[1, 2] += offset_y
-    # cx += offset_x
-    # cy += offset_y
+    else:
+        cx += offset_x
+        cy += offset_y
 
-    intrinsic = {'width': width, 'height': height, 'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy,
-                 'H': np.reshape(T, -1).tolist()}
-    print(intrinsic)
+        raw_rgb = fetch_raw_rgb(image_id)
+        pcd_orig, mask_orig, _, _ = fetch_original_pcd(image_id)
 
-    raw_rgb = normalize_rgb(cv2.imread('/home/junha/data/sunrefer/rgb/{}.jpg'.format(image_id)))
+        sampled_mask = np.zeros((height, width), dtype=bool)
+        sampled_depth = np.zeros((height, width), dtype=np.float32)
+        out_rgb = np.zeros((height, width, 3), dtype=np.uint8)
 
-    raw_depth_ = cv2.imread('/home/junha/data/sunrefer/raw_depth/{}.png'.format(image_id), cv2.IMREAD_UNCHANGED)
-    raw_depth_ = np.bitwise_or(np.right_shift(raw_depth_, 3), np.left_shift(raw_depth_, 13)).astype(np.float32) / 1000.
-    raw_depth_[raw_depth_ > 7.0] = 0.
-    raw_mask_ = raw_depth_ > 0
+        xx_ = fx * pcd_orig[..., 0] / pcd_orig[..., 2] + cx
+        yy_ = fy * pcd_orig[..., 1] / pcd_orig[..., 2] + cy
+        mm = np.logical_and(~np.isnan(xx_), ~np.isnan(yy_))
+        xx = np.round(xx_).astype(dtype=np.int32)
+        yy = np.round(yy_).astype(dtype=np.int32)
+        grid_x, grid_y = np.meshgrid(
+            np.linspace(0, pcd_orig.shape[1] - 1, pcd_orig.shape[1]),
+            np.linspace(0, pcd_orig.shape[0] - 1, pcd_orig.shape[0]))
+        grid_x = grid_x.astype(dtype=np.int32)
+        grid_y = grid_y.astype(dtype=np.int32)
+        xx = xx[mm]
+        yy = yy[mm]
+        grid_x = grid_x[mm]
+        grid_y = grid_y[mm]
+        mm = (0 <= xx) & (xx < width) & (0 <= yy) & (yy < height)
+        xx = xx[mm]
+        yy = yy[mm]
+        grid_x = grid_x[mm]
+        grid_y = grid_y[mm]
 
-    raw_mask = raw_mask_.astype(np.float32)[..., np.newaxis]
-    raw_depth = raw_depth_[..., np.newaxis]
+        sampled_mask[yy, xx] = True
+        sampled_depth[yy, xx] = pcd_orig[grid_y, grid_x, 2]
+        sampled_depth[~sampled_mask] = 0.
+        out_depth = np.left_shift((sampled_depth * 1000.).astype(dtype=np.uint16), 3)
+        cv2.imwrite(str(out_depth_path), out_depth)
 
-    raw_data = np.concatenate((raw_depth, raw_rgb, raw_mask), axis=-1)
-    data = cv2.warpPerspective(raw_data, T, (width, height))
+        out_rgb[yy, xx, :] = raw_rgb[grid_y, grid_x, :]
+        out_rgb[~sampled_mask, :] = 0
+        out_rgb = cv2.cvtColor(out_rgb, cv2.COLOR_BGR2RGB)
+        cv2.imwrite(str(out_rgb_path), out_rgb)
 
-    # pcd, mask, rx, ry = pcd_from_depth(data[..., 0], None, fx, fy, cx, cy)
-
-    mask = data[..., -1] > 0.95
-    depth = data[..., 0]
-    mx = np.linspace(0, depth.shape[1] - 1, depth.shape[1], dtype=np.float32)
-    my = np.linspace(0, depth.shape[0] - 1, depth.shape[0], dtype=np.float32)
-    rx = np.linspace(0., 1., depth.shape[1], dtype=np.float32)
-    ry = np.linspace(0., 1., depth.shape[0], dtype=np.float32)
-    rx, ry = np.meshgrid(rx, ry)
-    xx, yy = np.meshgrid(mx, my)
-    xx = (xx - cx) * depth / fx
-    yy = (yy - cy) * depth / fy
-    pcd = np.stack((xx, yy, depth), axis=-1)
-
-    rgb = denormalize_rgb(data[..., 1:4])
-    cv2.imwrite('/home/junha/Downloads/{}_h.jpg'.format(image_id), rgb)
-
-
-
-    sampled_mask = np.zeros((height, width), dtype=bool)
-    sampled_rgb = np.zeros((height, width, 3), dtype=np.uint8)
-    sampled_depth = np.zeros((height, width), dtype=np.float32)
-
-    xx_ = fx * pcd_orig[..., 0] / pcd_orig[..., 2] + cx
-    yy_ = fy * pcd_orig[..., 1] / pcd_orig[..., 2] + cy
-    mm = np.logical_and(~np.isnan(xx_), ~np.isnan(yy_))
-    xx = np.round(xx_).astype(dtype=np.int32)
-    yy = np.round(yy_).astype(dtype=np.int32)
-    grid_x, grid_y = np.meshgrid(
-        np.linspace(0, pcd_orig.shape[1] - 1, pcd_orig.shape[1]),
-        np.linspace(0, pcd_orig.shape[0] - 1, pcd_orig.shape[0]))
-    grid_x = grid_x.astype(dtype=np.int32)
-    grid_y = grid_y.astype(dtype=np.int32)
-    xx = xx[mm]
-    yy = yy[mm]
-    grid_x = grid_x[mm]
-    grid_y = grid_y[mm]
-    mm = (0 <= xx) & (xx < width) & (0 <= yy) & (yy < height)
-    xx = xx[mm]
-    yy = yy[mm]
-    grid_x = grid_x[mm]
-    grid_y = grid_y[mm]
-
-    sampled_rgb[yy, xx, :] = rgb[grid_y, grid_x, :]
-    sampled_mask[yy, xx] = True
-    sampled_depth[yy, xx] = pcd[grid_y, grid_x, 2]
-
-    pcd_pixel, mask_pixel, _, _ = pcd_from_depth(sampled_depth, None, fx, fy, cx, cy)
-    print(pcd_pixel.shape, mask_pixel.shape)
+        out_intrinsic = {
+            'width': int(width),
+            'height': int(height),
+            'fx': float(fx),
+            'fy': float(fy),
+            'cx': float(cx),
+            'cy': float(cy),
+            'offset_x': float(offset_x),
+            'offset_y': float(offset_y),
+            'H': np.reshape(T, -1).tolist()}
+        with open(str(out_intrinsic_path), 'w') as file:
+            json.dump(out_intrinsic, file)
 
 
+def visualize_pixel_depth(image_id: str):
+    in_rgb_path = out_dir / '{}.jpg'.format(image_id)
+    in_depth_path = out_dir / '{}.png'.format(image_id)
+    in_intrinsic_path = out_dir / '{}.json'.format(image_id)
+    zz = convert_depth_float_from_uint8(cv2.imread(str(in_depth_path), cv2.IMREAD_UNCHANGED))
+    with open(str(in_intrinsic_path), 'r') as file:
+        intrinsic = json.load(file)
+    xx = np.linspace(0, zz.shape[1] - 1, zz.shape[1], dtype=np.float32)
+    yy = np.linspace(0, zz.shape[0] - 1, zz.shape[0], dtype=np.float32)
+    xx, yy = np.meshgrid(xx, yy)
+    xx = (xx - intrinsic['cx']) * zz / intrinsic['fx']
+    yy = (yy - intrinsic['cy']) * zz / intrinsic['fy']
+    xyz = np.stack((xx, yy, zz), axis=-1)
+    mask = zz > 0
 
-
+    # let us crop the image: (2, 101), (222, 665)
+    use_crop = False
+    if use_crop:
+        mask_crop = mask[101:666, 2:223]
+        xyz_crop = xyz[101:666, 2:223, :]
+        pts = xyz_crop[mask_crop, :]
+    else:
+        pts = xyz[mask, :]
 
     import open3d as o3d
-    pt1 = o3d.geometry.PointCloud()
-    pt2 = o3d.geometry.PointCloud()
-    pt3 = o3d.geometry.PointCloud()
-    pt1.points = o3d.utility.Vector3dVector(pcd_orig[mask_orig, :])
-    pt2.points = o3d.utility.Vector3dVector(pcd[mask, :])
-    pt3.points = o3d.utility.Vector3dVector(pcd_pixel[mask_pixel, :])
-    pt1.paint_uniform_color((1, 0, 0))
-    pt2.paint_uniform_color((0, 1, 0))
-    pt3.paint_uniform_color((0, 0, 1))
-    # pt1.estimate_normals()
-    # pt2.estimate_normals()
-    #
-    # reg_p2p = o3d.pipelines.registration.registration_icp(
-    #     pt2, pt1, 0.02, np.eye(4, dtype=np.float32),
-    #     o3d.pipelines.registration.TransformationEstimationPointToPlane())
-    # print(reg_p2p)
-    # print("Transformation is:")
-    # print(reg_p2p.transformation)
-
-    obj_list = [pt1, pt2, pt3]
-    for i, (_, aabb) in enumerate(aabb_dict[image_id]):
-        cx_, cy_, cz_, sx, sy, sz = aabb
-        line_mesh = create_line_mesh_from_center_size(np.array([cx_, -cy_, -cz_, sx, sy, sz]))
-        obj_list += line_mesh.cylinder_segments
-
+    obj_list = []
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts)
+    obj_list.append(pcd)
+    for _, v in aabb_dict[image_id]:
+        bbox = create_line_mesh_from_center_size(np.array([v[0], -v[1], -v[2], v[3], v[4], v[5]]))
+        obj_list += bbox.cylinder_segments
     o3d.visualization.draw_geometries(obj_list)
-    # image = np.zeros((height, width, 3), dtype=np.uint8)
-    # draw_registration_result(pt2, pt1, reg_p2p.transformation)
+
+
+def visualize_with_gt_box(image_id):
+    in_warp_rgb_path = out_dir / '{}.jpg'.format(image_id)
+    in_orig_rgb_path = '/home/junha/data/sunrefer/rgb/{}.jpg'.format(image_id)
+    in_depth_path = out_dir / '{}.png'.format(image_id)
+    in_intrinsic_path = out_dir / '{}.json'.format(image_id)
+
+    warp_rgb = cv2.imread(str(in_warp_rgb_path), cv2.IMREAD_COLOR)
+    orig_rgb = cv2.imread(str(in_orig_rgb_path), cv2.IMREAD_COLOR)
+    intrinsic = json.load(open(str(in_intrinsic_path), 'r'))
+    offset_x = intrinsic['offset_x']
+    offset_y = intrinsic['offset_y']
+
+    H = np.reshape(np.array(intrinsic['H'], dtype=np.float32), (3, 3))
+    print(H)
+
+    obj_list = meta_dict[image_id]['obj_2d']
+    for obj_item in obj_list:
+        x1, y1, w, h = obj_item['bbox_2d']
+        cv2.rectangle(orig_rgb, (x1, y1), (x1 + w, y1 + h), color=(0, 0, 255), thickness=2)
+
+        x2, y2 = x1 + w, y1 + h
+
+        p1 = np.array([[x1, x2, x2, x1], [y1, y1, y2, y2], [1, 1, 1, 1]], dtype=np.float32)
+        p2 = H @ p1
+        p2 = np.divide(p2[:2, :], np.tile(p2[-1, :], (2, 1)))
+        pts = np.transpose(np.round(p2).astype(dtype=np.int32))
+        pts = np.reshape(pts, (-1, 1, 2))
+        pts[..., 0] += int(offset_x)
+        pts[..., 1] += int(offset_y)
+        cv2.polylines(warp_rgb, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
+
+
+        x1 = int(0.5 * (p2[0, 0] + p2[0, 3]) + offset_x)
+        x2 = int(0.5 * (p2[0, 1] + p2[0, 2]) + offset_x)
+        y1 = int(0.5 * (p2[1, 0] + p2[1, 1]) + offset_y)
+        y2 = int(0.5 * (p2[1, 2] + p2[1, 3]) + offset_y)
+
+        x1 = int(min(warp_rgb.shape[1] - 1, max(0, x1)))
+        x2 = int(min(warp_rgb.shape[1] - 1, max(x1, x2)))
+        y1 = int(min(warp_rgb.shape[0] - 1, max(0, y1)))
+        y2 = int(min(warp_rgb.shape[0] - 1, max(y1, y2)))
+
+        cv2.rectangle(warp_rgb, (x1, y1), (x2, y2), (0, 255, 0), thickness=2)
+
+    cv2.imwrite('/home/junha/Downloads/{}_orig.jpg'.format(image_id), orig_rgb)
+    cv2.imwrite('/home/junha/Downloads/{}_warp.jpg'.format(image_id), warp_rgb)
+
+    # zz = convert_depth_float_from_uint8(cv2.imread(str(in_depth_path), cv2.IMREAD_UNCHANGED))
+    # with open(str(in_intrinsic_path), 'r') as file:
+    #     intrinsic = json.load(file)
+    # xx = np.linspace(0, zz.shape[1] - 1, zz.shape[1], dtype=np.float32)
+    # yy = np.linspace(0, zz.shape[0] - 1, zz.shape[0], dtype=np.float32)
+    # xx, yy = np.meshgrid(xx, yy)
+    # xx = (xx - intrinsic['cx']) * zz / intrinsic['fx']
+    # yy = (yy - intrinsic['cy']) * zz / intrinsic['fy']
+    # xyz = np.stack((xx, yy, zz), axis=-1)
+    # mask = zz > 0
+
+    # import open3d as o3d
+    # obj_list = []
+    # pcd = o3d.geometry.PointCloud()
+    # pcd.points = o3d.utility.Vector3dVector(pts)
+    # obj_list.append(pcd)
+    # for _, v in aabb_dict[image_id]:
+    #     bbox = create_line_mesh_from_center_size(np.array([v[0], -v[1], -v[2], v[3], v[4], v[5]]))
+    #     obj_list += bbox.cylinder_segments
+    # o3d.visualization.draw_geometries(obj_list)
+
+
+def fetch_warped_bbox(orig_bbox, intrinsic):
+    width = intrinsic['width']
+    height = intrinsic['height']
+    offset_x = intrinsic['offset_x']
+    offset_y = intrinsic['offset_y']
+    H = np.reshape(np.array(intrinsic['H'], dtype=np.float32), (3, 3))
+
+    x1, y1, w, h = orig_bbox
+    x2, y2 = x1 + w, y1 + h
+
+    p1 = np.array([[x1, x2, x2, x1], [y1, y1, y2, y2], [1, 1, 1, 1]], dtype=np.float32)
+    p2 = H @ p1
+    p2 = np.divide(p2[:2, :], np.tile(p2[-1, :], (2, 1)))
+
+    x1 = int(0.5 * (p2[0, 0] + p2[0, 3]) + offset_x)
+    x2 = int(0.5 * (p2[0, 1] + p2[0, 2]) + offset_x)
+    y1 = int(0.5 * (p2[1, 0] + p2[1, 1]) + offset_y)
+    y2 = int(0.5 * (p2[1, 2] + p2[1, 3]) + offset_y)
+
+    x1 = int(min(width - 1, max(0, x1)))
+    x2 = int(min(width - 1, max(x1, x2)))
+    y1 = int(min(height - 1, max(0, y1)))
+    y2 = int(min(height - 1, max(y1, y2)))
+    return x1, y1, x2 - x1, y2 - y1
+
+
+def visualize_with_gt_box(image_id):
+    in_warp_rgb_path = out_dir / '{}.jpg'.format(image_id)
+    in_orig_rgb_path = '/home/junha/data/sunrefer/rgb/{}.jpg'.format(image_id)
+    in_depth_path = out_dir / '{}.png'.format(image_id)
+    in_intrinsic_path = out_dir / '{}.json'.format(image_id)
+
+    warp_rgb = cv2.imread(str(in_warp_rgb_path), cv2.IMREAD_COLOR)
+    orig_rgb = cv2.imread(str(in_orig_rgb_path), cv2.IMREAD_COLOR)
+    intrinsic = json.load(open(str(in_intrinsic_path), 'r'))
+
+    width = intrinsic['width']
+    height = intrinsic['height']
+    offset_x = intrinsic['offset_x']
+    offset_y = intrinsic['offset_y']
+    H = np.reshape(np.array(intrinsic['H'], dtype=np.float32), (3, 3))
+
+    obj_list = meta_dict[image_id]['obj_2d']
+    for obj_item in obj_list:
+        # x1, y1, w, h = fetch_warped_bbox(obj_item['bbox_2d'], intrinsic)
+        x1, y1, w, h = obj_item['bbox_2d']
+        x2, y2 = x1 + w, y1 + h
+
+        p1 = np.array([[x1, x2, x2, x1], [y1, y1, y2, y2], [1, 1, 1, 1]], dtype=np.float32)
+        p2 = H @ p1
+        p2 = np.divide(p2[:2, :], np.tile(p2[-1, :], (2, 1)))
+
+        pts = np.transpose(np.round(p2).astype(dtype=np.int32))
+        pts = np.reshape(pts, (-1, 1, 2))
+        pts[..., 0] += int(offset_x)
+        pts[..., 1] += int(offset_y)
+        cv2.polylines(warp_rgb, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
+
+        x1 = int(0.5 * (p2[0, 0] + p2[0, 3]) + offset_x)
+        x2 = int(0.5 * (p2[0, 1] + p2[0, 2]) + offset_x)
+        y1 = int(0.5 * (p2[1, 0] + p2[1, 1]) + offset_y)
+        y2 = int(0.5 * (p2[1, 2] + p2[1, 3]) + offset_y)
+
+        x1 = int(min(width - 1, max(0, x1)))
+        x2 = int(min(width - 1, max(x1, x2)))
+        y1 = int(min(height - 1, max(0, y1)))
+        y2 = int(min(height - 1, max(y1, y2)))
+
+        cv2.rectangle(warp_rgb, (x1, y1), (x2, y2), (0, 255, 0), thickness=2)
+
+    cv2.imwrite('/home/junha/Downloads/{}_orig.jpg'.format(image_id), orig_rgb)
+    cv2.imwrite('/home/junha/Downloads/{}_warp.jpg'.format(image_id), warp_rgb)
+
+    # zz = convert_depth_float_from_uint8(cv2.imread(str(in_depth_path), cv2.IMREAD_UNCHANGED))
+    # with open(str(in_intrinsic_path), 'r') as file:
+    #     intrinsic = json.load(file)
+    # xx = np.linspace(0, zz.shape[1] - 1, zz.shape[1], dtype=np.float32)
+    # yy = np.linspace(0, zz.shape[0] - 1, zz.shape[0], dtype=np.float32)
+    # xx, yy = np.meshgrid(xx, yy)
+    # xx = (xx - intrinsic['cx']) * zz / intrinsic['fx']
+    # yy = (yy - intrinsic['cy']) * zz / intrinsic['fy']
+    # xyz = np.stack((xx, yy, zz), axis=-1)
+    # mask = zz > 0
+
+    # import open3d as o3d
+    # obj_list = []
+    # pcd = o3d.geometry.PointCloud()
+    # pcd.points = o3d.utility.Vector3dVector(pts)
+    # obj_list.append(pcd)
+    # for _, v in aabb_dict[image_id]:
+    #     bbox = create_line_mesh_from_center_size(np.array([v[0], -v[1], -v[2], v[3], v[4], v[5]]))
+    #     obj_list += bbox.cylinder_segments
+    # o3d.visualization.draw_geometries(obj_list)
+
+
+def update_meta_to_concise_directory():
+    image_id_list = ['{:06d}'.format(i) for i in range(1, 10336)]
+    orig_meta_dict = torch.load('/home/junha/data/sunrefer/meta.pt')
+    new_meta_dict = dict()
+
+    for image_id in image_id_list:
+        in_intrinsic_path = out_dir / '{}.json'.format(image_id)
+        intrinsic = json.load(open(str(in_intrinsic_path), 'r'))
+
+        orig_entry = orig_meta_dict[image_id]
+
+        new_entry = intrinsic
+        new_entry['E'] = orig_entry['E']
+        obj_list = orig_entry['obj_2d']
+        new_obj_list = []
+        for obj_item in obj_list:
+            x1, y1, w, h = fetch_warped_bbox(obj_item['bbox_2d'], intrinsic)
+            obj_item['bbox_2d'] = [x1, y1, w, h]
+            new_obj_list.append(obj_item)
+
+        new_entry['obj_2d'] = obj_list
+        new_entry['obj_3d'] = orig_entry['obj_3d']
+
+        new_meta_dict[image_id] = new_entry
+
+    torch.save(new_meta_dict, '/home/junha/data/sunrefer/xyzrgb_concise/meta.pt')
 
 
 if __name__ == '__main__':
-    tm = TransformManager()
-    tm.visualize_pcds('000001')
+    # image_id_list = ['{:06d}'.format(i) for i in range(1, 10336)]
+    # pool = Pool(20)
+    # result_list_tqdm = []
+    # for result in tqdm(pool.imap(fetch_pixel_depth, image_id_list), total=len(image_id_list)):
+    #     continue
+
+    update_meta_to_concise_directory()
+
+    # visualize_with_gt_box('010333')
+    # fetch_pixel_depth('000001')
+    # visualize_pixel_depth('000001')
+
+    # tm = TransformManager()
+    # tm.visualize_pcds('000001')
+    # tm.visualize_pcds('004131')
+    # tm.visualize_pcds('003000')
     # tm.visualize_pcds('009566')
     # estimate_homography_from_extrinsic('000001')
