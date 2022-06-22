@@ -140,14 +140,17 @@ def create_pcd_with_extrinsic(image_id: str):
     rgb = scene.load_rgb()
     pcd, mask, rx, ry = scene.load_pcd(apply_extrinsics=True)
 
-    seg_out = np.load(str(fetch_segformer_path(image_id)))
-    seg_mask = np.ones(seg_out.shape, dtype=bool)
-    for label in [0, 3, 5]:
-        seg_mask[seg_out == label] = False
+    # seg_out = np.load(str(fetch_segformer_path(image_id)))
+    # seg_mask = np.ones(seg_out.shape, dtype=bool)
+    # for label in [0, 3, 5]:
+    #     seg_mask[seg_out == label] = False
+    #
+    # mask_nz = np.logical_and(np.abs(pcd[..., 2]) > 1e-6, seg_mask)
+    # if np.sum(mask_nz) < 10000:
+    #     mask_nz = np.abs(pcd[..., 2]) > 1e-6
 
-    mask_nz = np.logical_and(np.abs(pcd[..., 2]) > 1e-6, seg_mask)
-    if np.sum(mask_nz) < 10000:
-        mask_nz = np.abs(pcd[..., 2]) > 1e-6
+    mask_nz = np.abs(pcd[..., 2]) > 1e-6
+
     px = scene.fx * pcd[mask_nz, 0] / pcd[mask_nz, 2] + scene.cx
     py = scene.fy * pcd[mask_nz, 1] / pcd[mask_nz, 2] + scene.cy
     sampled_x = np.reshape(px, (-1,))
@@ -399,12 +402,14 @@ if __name__ == '__main__':
     # dataset.render_rgb_from_points('001213')
     # dataset.visualize_pcd('001213')
 
+    create_pcd_with_extrinsic('001265')
+
     # image_id_list = ['{:06d}'.format(i) for i in range(1, 10336)]
-    image_id_list = ['002803', '003654', '003701', '004131', '004281', '004767', '009566', '009587', '010079', '010199']
-    pool = Pool(20)
-    result_list_tqdm = []
-    for result in tqdm(pool.imap(create_pcd_with_extrinsic, image_id_list), total=len(image_id_list)):
-        pass
+    # image_id_list = ['002803', '003654', '003701', '004131', '004281', '004767', '009566', '009587', '010079', '010199']
+    # pool = Pool(20)
+    # result_list_tqdm = []
+    # for result in tqdm(pool.imap(create_pcd_with_extrinsic, image_id_list), total=len(image_id_list)):
+    #     pass
 
     # iou_by_uniq_id = {k: v for k, v in result_list_tqdm}
     #
