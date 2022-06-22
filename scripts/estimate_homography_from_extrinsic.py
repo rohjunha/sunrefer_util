@@ -2,6 +2,7 @@ import json
 from multiprocessing import Pool
 from pathlib import Path
 from shutil import copyfile
+from typing import List, Dict
 
 import cv2
 import numpy as np
@@ -606,30 +607,151 @@ def visualize_with_gt_box(image_id):
 
 def update_meta_to_concise_directory():
     image_id_list = ['{:06d}'.format(i) for i in range(1, 10336)]
+    aabb_dict = json.load(open('/home/junha/data/sunrefer/xyzrgb/aabb.json', 'r'))
     orig_meta_dict = torch.load('/home/junha/data/sunrefer/meta.pt')
     new_meta_dict = dict()
 
     for image_id in image_id_list:
         in_intrinsic_path = out_dir / '{}.json'.format(image_id)
         intrinsic = json.load(open(str(in_intrinsic_path), 'r'))
+        aabb_list = aabb_dict[image_id]
 
         orig_entry = orig_meta_dict[image_id]
 
         new_entry = intrinsic
         new_entry['E'] = orig_entry['E']
-        obj_list = orig_entry['obj_2d']
-        new_obj_list = []
-        for obj_item in obj_list:
+        obj_2d_list = orig_entry['obj_2d']
+        new_obj_2d_list = []
+        for obj_item in obj_2d_list:
             x1, y1, w, h = fetch_warped_bbox(obj_item['bbox_2d'], intrinsic)
             obj_item['bbox_2d'] = [x1, y1, w, h]
-            new_obj_list.append(obj_item)
+            new_obj_2d_list.append(obj_item)
+        new_entry['obj_2d'] = new_obj_2d_list
 
-        new_entry['obj_2d'] = obj_list
-        new_entry['obj_3d'] = orig_entry['obj_3d']
-
-        new_meta_dict[image_id] = new_entry
+        obj_3d_list = orig_entry['obj_3d']
+        new_obj_3d_list = []
+        for i, obj_item in enumerate(obj_3d_list):
+            cls_name, v = aabb_list[i]
+            assert cls_name == obj_item['class_name']
+            obj_item['aabb'] = [v[0], -v[1], -v[2], v[3], v[4], v[5]]
+            new_obj_3d_list.append(obj_item)
+        new_entry['obj_3d'] = new_obj_3d_list
 
     torch.save(new_meta_dict, '/home/junha/data/sunrefer/xyzrgb_concise/meta.pt')
+
+
+def update_new_meta():
+    new_meta_dict = torch.load('/home/junha/data/sunrefer/xyzrgb_concise/meta.pt')
+    aabb_dict = json.load(open('/home/junha/data/sunrefer/xyzrgb/aabb.json', 'r'))
+    for image_id in new_meta_dict.keys():
+        obj_3d_list = new_meta_dict[image_id]['obj_3d']
+        aabb_list = aabb_dict[image_id]
+        assert len(obj_3d_list) == len(aabb_list)
+        for i, (cls_name, v) in enumerate(aabb_list):
+            assert cls_name == obj_3d_list[i]['class_name']
+            obj_3d_list[i]['aabb'] = [v[0], -v[1], -v[2], v[3], v[4], v[5]]
+        new_meta_dict[image_id]['obj_3d'] = obj_3d_list
+
+    torch.save(new_meta_dict, '/home/junha/data/sunrefer/xyzrgb_concise/meta2.pt')
+
+
+class Object2DInformation:
+    def __init__(self, item):
+        self.class_name: str = item['class_name']
+        self.has_3d: bool = item['has_3d_bbox']
+        self.bbox: List[float] = item['bbox_2d']
+
+
+class Object3DInformation:
+    def __init__(self, item):
+        self.class_name: str = item['class_name']
+        self.basis: np.array = item['basis']
+        self.coeffs: np.array = item['coeffs']
+        self.centroid: np.array = item['centroid']
+        self.orientation: np.array = item['orientation']
+        self.aabb: np.array = np.array(item['aabb'])
+
+
+class MetaInformation:
+    def __init__(self, item):
+        self.width: int = item['width']
+        self.height: int = item['height']
+        self.fx: float = item['fx']
+        self.fy: float = item['fy']
+        self.cx: float = item['cx']
+        self.cy: float = item['cy']
+        self.offset_x: float = item['offset_x']
+        self.offset_y: float = item['offset_y']
+        self.H: np.array = np.reshape(np.array(item['H'], dtype=np.float32), (3, 3))
+        self.E: np.array = item['E'].astype(dtype=np.float32)
+        self.obj_2d_list = list(map(Object2DInformation, item['obj_2d']))
+        self.obj_3d_list = list(map(Object3DInformation, item['obj_3d']))
+
+
+def load_meta_information() -> Dict[str, MetaInformation]:
+    meta_dict = torch.load('/home/junha/data/sunrefer/xyzrgb_concise/meta.pt')
+    return {k: MetaInformation(v) for k, v in meta_dict.items()}
+
+
+def update_sunrefer_concise():
+    meta_dict = load_meta_information()
+    orig_refer = json.load(open('/home/junha/data/sunrefer/SUNREFER_v2_revised.json', 'r'))
+    new_refer_dict = dict()
+
+    for anno_id in sorted(orig_refer.keys()):
+        image_id, object_id = anno_id.split('_')
+        object_id = int(object_id)
+        refer_entry = orig_refer[anno_id]
+        object_entry = meta_dict[image_id].obj_2d_list[int(object_id)]
+        if refer_entry['object_name'] != object_entry.class_name:
+            print(anno_id, refer_entry['object_name'], object_entry.class_name)
+        refer_entry['bbox2d'] = object_entry.bbox
+        new_refer_dict[anno_id] = refer_entry
+
+    with open('/home/junha/data/sunrefer/xyzrgb_concise/sunrefer.json', 'w') as file:
+        json.dump(new_refer_dict, file, indent=4)
+
+
+def test_sunrefer_concise():
+    refer_dict = json.load(open('/home/junha/data/sunrefer/xyzrgb_concise/sunrefer.json', 'r'))
+    meta_dict: Dict[str, MetaInformation] = load_meta_information()
+
+    for anno_id, refer_entry in refer_dict.items():
+        print(anno_id)
+        image_id, object_id = anno_id.split('_')
+        object_id = int(object_id)
+        bbox = refer_entry['bbox2d']
+
+        meta_entry = meta_dict[image_id]
+        target_object_entry = meta_entry.obj_3d_list[object_id]
+        print('target bbox2d', bbox)
+        print('target bbox3d aabb', target_object_entry.aabb)
+
+        raw_depth = cv2.imread('/home/junha/data/sunrefer/xyzrgb_concise/{}.png'.format(image_id), cv2.IMREAD_UNCHANGED)
+        depth = convert_depth_float_from_uint8(raw_depth)
+        pcd, mask, rx, ry = unproject(depth, meta_entry.fx, meta_entry.fy, meta_entry.cx, meta_entry.cy)
+        print(pcd.shape)
+
+        x1, y1, w, h = bbox
+        x2, y2 = x1 + w, y1 + h
+        x1 = max(0, min(meta_entry.width - 1, x1))
+        x2 = max(x1, min(meta_entry.width, x2))
+        y1 = max(0, min(meta_entry.height - 1, y1))
+        y2 = max(y1, min(meta_entry.height, y2))
+        pcd_crop = pcd[y1:y2, x1:x2, :]
+        depth_crop = depth[y1:y2, x1:x2]
+        mask_crop = mask[y1:y2, x1:x2]
+        pcd_sample = pcd_crop[mask_crop, :]
+        depth_sample = depth_crop[mask_crop]
+        print(pcd_sample.shape)
+
+        print(np.min(pcd_sample[:, 2]), np.max(pcd_sample[:, 2]))
+        print(np.min(depth_sample), np.max(depth_sample))
+
+        # todo: create pointcloud dataset
+        # todo: create image patch dataset
+
+        break
 
 
 if __name__ == '__main__':
@@ -639,7 +761,14 @@ if __name__ == '__main__':
     # for result in tqdm(pool.imap(fetch_pixel_depth, image_id_list), total=len(image_id_list)):
     #     continue
 
-    update_meta_to_concise_directory()
+    # update_meta_to_concise_directory()
+    # update_new_meta()
+    # meta_dict = read_meta_information()
+    # for k, v in list(meta_dict.items())[:2]:
+    #     for i, (o1, o2) in enumerate(zip(v.obj_2d_list, v.obj_3d_list)):
+    #         print(k, i, o1.bbox, o2.aabb)
+    # update_sunrefer_concise()
+    test_sunrefer_concise()
 
     # visualize_with_gt_box('010333')
     # fetch_pixel_depth('000001')
