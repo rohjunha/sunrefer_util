@@ -162,6 +162,18 @@ def fetch_concise_depth_path(image_id: str) -> Path:
     return _ensure_exists(fetch_concise_data_dir() / '{}.png'.format(image_id))
 
 
+def fetch_concise_refer_path() -> Path:
+    return _ensure_exists(fetch_concise_data_dir() / 'sunrefer.json')
+
+
+def fetch_concise_correspondence_path() -> Path:
+    return _ensure_exists(fetch_concise_data_dir() / 'correspondence.json')
+
+
+def fetch_concise_item_list_path() -> Path:
+    return _ensure_exists(fetch_concise_data_dir() / 'item_list.txt')
+
+
 def test_fetch_functions():
     fetch_data_root_dir()
     fetch_rgb_dir()

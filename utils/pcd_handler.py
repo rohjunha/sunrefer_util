@@ -1,11 +1,12 @@
+import json
 from pathlib import Path
 from typing import Tuple
 
 import cv2
 import numpy as np
 
-from utils.directory import fetch_concise_storage_path
-from utils.geometry import convert_depth_float_from_uint8, unproject, transform
+from utils.directory import fetch_concise_storage_path, fetch_concise_correspondence_path
+from utils.geometry import convert_depth_float_from_uint8, unproject
 from utils.scene import load_scene_information, MetaInformation
 from utils.storage import PointCloudStorage
 
@@ -61,12 +62,13 @@ class PointCloudHandler:
         x1, x2, y1, y2 = convert_bbox_into_slices(bbox, *rgb.shape[:2])
         return rgb[y1:y2, x1:x2, :]
 
-    def fetch_pcd(self, image_id: str):
+    def fetch_raw_depth(self, image_id: str):
+        return self.storage.get_depth(image_id)
+
+    def fetch_pcd(self, image_id: str) -> Tuple[np.array, np.array, np.array, np.array]:
         scene: MetaInformation = self.scene_dict[image_id]
         depth = convert_depth_float_from_uint8(self.storage.get_depth(image_id))
-        pcd, mask, rx, ry = unproject(float_depth=depth, fx=scene.fx, fy=scene.fy, cx=scene.cx, cy=scene.cy)
-        pcd = transform(pcd, scene.E)
-        return pcd, mask, rx, ry
+        return unproject(float_depth=depth, fx=scene.fx, fy=scene.fy, cx=scene.cx, cy=scene.cy)
 
     def fetch_cropped_pcd(self, image_id: str, bbox):
         pcd, mask, rx, ry = self.fetch_pcd(image_id)
@@ -93,6 +95,45 @@ class PointCloudHandler:
         xyz, mask = self.fetch_cropped_xyzrgb(image_id, bbox)
         vec_xyz = xyz[mask, :]
         return vec_xyz[np.random.choice(vec_xyz.shape[0], num_samples), :]
+
+
+class PointCloudBoundingBoxHandler(PointCloudHandler):
+    def __init__(
+            self,
+            split: str,
+            db_path: Path = None):
+        PointCloudHandler.__init__(self, db_path)
+        assert split in {'train', 'test', 'val'}
+        self.num_points = 1000
+        self.split = split
+        image_id_range = range(5051, 10336) if split == 'train' else range(1, 5051)
+        self.image_id_list = ['{:06d}'.format(i) for i in image_id_range]
+        with open(str(fetch_concise_correspondence_path()), 'r') as file:
+            self.corr_dict = json.load(file)
+        self.item_list = []
+        for image_id in self.image_id_list:
+            self.item_list += [(image_id, i, j, cls_name) for i, j, cls_name in self.corr_dict[image_id]]
+
+    def __len__(self):
+        return len(self.item_list)
+
+    def __getitem__(self, index):
+        image_id, i, j, cls_name = self.item_list[index]
+        scene = self.scene_dict[image_id]
+        obj_2d = scene.obj_2d_list[i]
+        sampled_points = self.fetch_sampled_points(image_id, obj_2d.bbox, self.num_points)  # (#points, 8)
+        obj_3d = scene.obj_3d_list[j]
+        return {
+            'points': sampled_points,
+            'bbox': obj_2d.bbox,
+            'aabb': obj_3d.aabb,
+            'fx': scene.fx,
+            'fy': scene.fy,
+            'cx': scene.cx,
+            'cy': scene.cy,
+            'width': scene.width,
+            'height': scene.height,
+        }
 
 
 if __name__ == '__main__':
