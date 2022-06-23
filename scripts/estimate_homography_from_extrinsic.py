@@ -1,42 +1,16 @@
 import json
-from multiprocessing import Pool
 from pathlib import Path
-from shutil import copyfile
-from typing import List, Dict
+from typing import Dict
 
 import cv2
 import numpy as np
 import torch
-from tqdm import tqdm
 
 from scripts.compute_iou import create_line_mesh_from_center_size
+from utils.geometry import convert_depth_float_from_uint8, unproject, transform
 from utils.intrinsic_fetcher import IntrinsicFetcher
 from utils.meta_io import fetch_scene_object_by_image_id
-
-
-def convert_depth_float_from_uint8(raw_depth: np.ndarray):
-    assert raw_depth.dtype == np.uint16
-    depth = np.bitwise_or(np.right_shift(raw_depth, 3), np.left_shift(raw_depth, 13)).astype(np.float32) / 1000.
-    depth[depth > 7.0] = 0.
-    return depth
-
-
-def unproject(float_depth, fx, fy, cx, cy):
-    mask = float_depth > 0.
-    mx = np.linspace(0, float_depth.shape[1] - 1, float_depth.shape[1], dtype=np.float32)
-    my = np.linspace(0, float_depth.shape[0] - 1, float_depth.shape[0], dtype=np.float32)
-    rx = np.linspace(0., 1., float_depth.shape[1], dtype=np.float32)
-    ry = np.linspace(0., 1., float_depth.shape[0], dtype=np.float32)
-    rx, ry = np.meshgrid(rx, ry)
-    xx, yy = np.meshgrid(mx, my)
-    xx = (xx - cx) * float_depth / fx
-    yy = (yy - cy) * float_depth / fy
-    pcd = np.stack((xx, yy, float_depth), axis=-1)
-    return pcd, mask, rx, ry
-
-
-def transform(pcd, E):
-    return pcd @ np.transpose(E)
+from utils.scene import MetaInformation, load_scene_information
 
 
 def normalize_rgb(raw_rgb):
@@ -655,46 +629,8 @@ def update_new_meta():
     torch.save(new_meta_dict, '/home/junha/data/sunrefer/xyzrgb_concise/meta2.pt')
 
 
-class Object2DInformation:
-    def __init__(self, item):
-        self.class_name: str = item['class_name']
-        self.has_3d: bool = item['has_3d_bbox']
-        self.bbox: List[float] = item['bbox_2d']
-
-
-class Object3DInformation:
-    def __init__(self, item):
-        self.class_name: str = item['class_name']
-        self.basis: np.array = item['basis']
-        self.coeffs: np.array = item['coeffs']
-        self.centroid: np.array = item['centroid']
-        self.orientation: np.array = item['orientation']
-        self.aabb: np.array = np.array(item['aabb'])
-
-
-class MetaInformation:
-    def __init__(self, item):
-        self.width: int = item['width']
-        self.height: int = item['height']
-        self.fx: float = item['fx']
-        self.fy: float = item['fy']
-        self.cx: float = item['cx']
-        self.cy: float = item['cy']
-        self.offset_x: float = item['offset_x']
-        self.offset_y: float = item['offset_y']
-        self.H: np.array = np.reshape(np.array(item['H'], dtype=np.float32), (3, 3))
-        self.E: np.array = item['E'].astype(dtype=np.float32)
-        self.obj_2d_list = list(map(Object2DInformation, item['obj_2d']))
-        self.obj_3d_list = list(map(Object3DInformation, item['obj_3d']))
-
-
-def load_meta_information() -> Dict[str, MetaInformation]:
-    meta_dict = torch.load('/home/junha/data/sunrefer/xyzrgb_concise/meta.pt')
-    return {k: MetaInformation(v) for k, v in meta_dict.items()}
-
-
 def update_sunrefer_concise():
-    meta_dict = load_meta_information()
+    meta_dict = load_scene_information()
     orig_refer = json.load(open('/home/junha/data/sunrefer/SUNREFER_v2_revised.json', 'r'))
     new_refer_dict = dict()
 
@@ -714,7 +650,7 @@ def update_sunrefer_concise():
 
 def test_sunrefer_concise():
     refer_dict = json.load(open('/home/junha/data/sunrefer/xyzrgb_concise/sunrefer.json', 'r'))
-    meta_dict: Dict[str, MetaInformation] = load_meta_information()
+    meta_dict: Dict[str, MetaInformation] = load_scene_information()
 
     for anno_id, refer_entry in refer_dict.items():
         print(anno_id)
@@ -752,6 +688,9 @@ def test_sunrefer_concise():
         # todo: create image patch dataset
 
         break
+
+
+
 
 
 if __name__ == '__main__':

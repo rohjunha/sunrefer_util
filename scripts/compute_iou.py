@@ -12,6 +12,7 @@ from pytorch3d.ops import box3d_overlap
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
+import utils.geometry
 from utils.directory import fetch_segformer_path, fetch_xyzrgb_pcd_path, fetch_xyzrgb_bbox_path, fetch_split_test_path, \
     fetch_split_train_path, fetch_object_2d_3d_path, fetch_sunrefer_anno_path
 from utils.intrinsic_fetcher import IntrinsicFetcher
@@ -197,7 +198,7 @@ def compute_iou(
         pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
             cropped_rgbd_image,
             o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy, cx, cy))
-        pcd.transform(Rt)
+        utils.geometry.transform(Rt)
 
         # Filter out outliers in small clusters.
         inlier_pcd = select_inlier_pcd(pcd, pcd_th_ratio) if pcd_th_ratio > 1e-3 else pcd
@@ -378,7 +379,7 @@ class PredictionVisualizer:
         if self.verbose:
             o3d_obj_list = []
             coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.6, origin=[0, 0, 0])
-            coord_frame.transform(iTyz)
+            utils.geometry.transform(iTyz)
             # coord_frame.transform(tiE)
             o3d_obj_list.append(coord_frame)
             o3d_obj_list.append(new_pcd)
@@ -469,7 +470,7 @@ class PredictionVisualizer:
 
         coord_frame_orig = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.6, origin=[0, 0, 0])
         coord_frame_revised = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.6, origin=[0, 0, 0])
-        coord_frame_revised.transform(np.linalg.inv(Rt))
+        utils.geometry.transform(np.linalg.inv(Rt))
 
         o3d_obj_list.append(coord_frame_orig)
         o3d_obj_list.append(coord_frame_revised)
@@ -489,7 +490,7 @@ class PredictionVisualizer:
 
             line_mesh = create_line_mesh(centroid, basis, coeffs, aabb=self.aabb, color=color, radius=radius)
             for s in line_mesh.cylinder_segments:
-                s.transform(np.linalg.inv(Rt))
+                utils.geometry.transform(np.linalg.inv(Rt))
             o3d_obj_list += line_mesh.cylinder_segments
         o3d.visualization.draw_geometries(o3d_obj_list)
 
@@ -518,7 +519,7 @@ class PredictionVisualizer:
         pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
             image=rgbd_image,
             intrinsic=o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy, cx, cy))
-        pcd.transform(Rt)
+        utils.geometry.transform(Rt)
 
         # pcd = o3d.geometry.PointCloud()
         # points = np.load('/home/junha/Downloads/{}_pcd.npy'.format(image_id))

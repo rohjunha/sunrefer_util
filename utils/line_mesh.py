@@ -1,6 +1,8 @@
 import numpy as np
 import open3d as o3d
 
+import utils.geometry
+
 
 def align_vector_to_another(a=np.array([0, 0, 1]), b=np.array([1, 0, 0])):
     """
@@ -99,7 +101,7 @@ class LineMesh:
 
     def transform(self, t):
         for cylinder in self.cylinder_segments:
-            cylinder.transform(t)
+            utils.geometry.transform(t)
         self.transform_points(t)
 
     def translate_points(self, t):
