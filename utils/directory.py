@@ -142,6 +142,26 @@ def fetch_seg_path(image_id: str) -> Path:
     return _ensure_exists(fetch_seg_dir() / '{}.png'.format(image_id))
 
 
+def fetch_concise_data_dir() -> Path:
+    return _ensure_file_exists('xyzrgb_concise')
+
+
+def fetch_concise_storage_path() -> Path:
+    return _ensure_exists(fetch_concise_data_dir() / 'pcd')
+
+
+def fetch_concise_meta_path() -> Path:
+    return _ensure_exists(fetch_concise_data_dir() / 'meta.pt')
+
+
+def fetch_concise_rgb_path(image_id: str) -> Path:
+    return _ensure_exists(fetch_concise_data_dir() / '{}.jpg'.format(image_id))
+
+
+def fetch_concise_depth_path(image_id: str) -> Path:
+    return _ensure_exists(fetch_concise_data_dir() / '{}.png'.format(image_id))
+
+
 def test_fetch_functions():
     fetch_data_root_dir()
     fetch_rgb_dir()

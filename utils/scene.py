@@ -3,6 +3,8 @@ from typing import List, Dict
 import numpy as np
 import torch
 
+from utils.directory import fetch_concise_meta_path
+
 
 class Object2DInformation:
     def __init__(self, item):
@@ -38,5 +40,5 @@ class MetaInformation:
 
 
 def load_scene_information() -> Dict[str, MetaInformation]:
-    meta_dict = torch.load('/home/junha/data/sunrefer/xyzrgb_concise/meta.pt')
+    meta_dict = torch.load(str(fetch_concise_meta_path()))
     return {k: MetaInformation(v) for k, v in meta_dict.items()}

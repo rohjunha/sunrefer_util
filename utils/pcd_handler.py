@@ -1,8 +1,10 @@
 from pathlib import Path
 from typing import Tuple
 
+import cv2
 import numpy as np
 
+from utils.directory import fetch_concise_storage_path
 from utils.geometry import convert_depth_float_from_uint8, unproject, transform
 from utils.scene import load_scene_information, MetaInformation
 from utils.storage import PointCloudStorage
@@ -33,10 +35,12 @@ def denormalize_rgb(float_rgb):
     return np.stack((r, g, b), axis=-1).astype(np.uint8)
 
 
-class PointCloudDataset:
+class PointCloudHandler:
     def __init__(
             self,
-            db_path: Path = Path.home() / 'data/sunrefer/xyzrgb_concise/pcd'):
+            db_path: Path = None):
+        if db_path is None:
+            db_path = fetch_concise_storage_path()
         assert db_path.exists()
         self.storage = PointCloudStorage(read_only=True, db_path=db_path)
         self.scene_dict = load_scene_information()
@@ -82,7 +86,7 @@ class PointCloudDataset:
 
     def fetch_cropped_xyzrgb(self, image_id: str, bbox) -> Tuple[np.array, np.array]:
         xyzrgb, mask = self.fetch_xyzrgb(image_id)
-        x1, x2, y1, y2 = convert_bbox_into_slices(bbox, *pcd.shape[:2])
+        x1, x2, y1, y2 = convert_bbox_into_slices(bbox, *xyzrgb.shape[:2])
         return xyzrgb[y1:y2, x1:x2, :], mask[y1:y2, x1:x2]
 
     def fetch_sampled_points(self, image_id: str, bbox, num_samples: int):
@@ -92,13 +96,20 @@ class PointCloudDataset:
 
 
 if __name__ == '__main__':
-    dataset = PointCloudDataset()
-    image_id = '000001'
-    bbox = [100, 100, 50, 100]
-    pcd, _, _, _ = dataset.fetch_pcd(image_id)
-    print(pcd.shape)
-    pcd_crop, _, _, _ = dataset.fetch_cropped_pcd(image_id, bbox)
-    xyzrgb, _ = dataset.fetch_cropped_xyzrgb(image_id, bbox)
-    print(xyzrgb.shape)
-    samples = dataset.fetch_sampled_points(image_id, bbox, 100)
-    print(samples.shape)
+    dataset = PointCloudHandler()
+    image_id = '010000'
+
+    image = dataset.fetch_raw_rgb(image_id)
+    for obj_2d in dataset.scene_dict[image_id].obj_2d_list:
+        x1, y1, w, h = obj_2d.bbox
+        cv2.rectangle(image, (x1, y1), (x1 + w, y1 + h), color=(0, 0, 255), thickness=2)
+    cv2.imwrite('/home/junha/Downloads/{}_verify.jpg'.format(image_id), image)
+
+    # bbox = [100, 100, 50, 100]
+    # pcd, _, _, _ = dataset.fetch_pcd(image_id)
+    # print(pcd.shape)
+    # pcd_crop, _, _, _ = dataset.fetch_cropped_pcd(image_id, bbox)
+    # xyzrgb, _ = dataset.fetch_cropped_xyzrgb(image_id, bbox)
+    # print(xyzrgb.shape)
+    # samples = dataset.fetch_sampled_points(image_id, bbox, 100)
+    # print(samples.shape)

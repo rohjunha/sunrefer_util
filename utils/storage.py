@@ -1,13 +1,14 @@
 from pathlib import Path
-from typing import Any, Dict, Tuple
-from typing import Callable, Set
+from typing import Tuple
 
 import cv2
 import lmdb
-import numpy as np
 import msgpack
 import msgpack_numpy
+import numpy as np
 from tqdm import tqdm
+
+from utils.directory import fetch_concise_storage_path, fetch_concise_rgb_path, fetch_concise_depth_path
 
 msgpack_numpy.patch()
 
@@ -84,22 +85,20 @@ class PointCloudStorage:
         self.env.close()
 
 
-def fetch_point_cloud_storage(dataset_name: str) -> PointCloudStorage:
-    data_dir = Path.home() / 'data/sunrefer/xyzrgb_concise'
-    storage_path = data_dir / 'pcd'
-
+def fetch_point_cloud_storage() -> PointCloudStorage:
+    storage_path = fetch_concise_storage_path()
     if not storage_path.exists():
         storage = PointCloudStorage(read_only=False, db_path=storage_path)
         for image_id in tqdm(['{:06d}'.format(i) for i in range(1, 10336)]):
-            rgb = cv2.imread(str(data_dir / '{}.jpg'.format(image_id)), cv2.IMREAD_COLOR)
-            depth = cv2.imread(str(data_dir / '{}.png'.format(image_id)), cv2.IMREAD_UNCHANGED)
+            rgb = cv2.imread(str(fetch_concise_rgb_path(image_id)), cv2.IMREAD_COLOR)
+            depth = cv2.imread(str(fetch_concise_depth_path(image_id)), cv2.IMREAD_UNCHANGED)
             storage.put_rgb(image_id, rgb)
             storage.put_depth(image_id, depth)
     return PointCloudStorage(read_only=True, db_path=storage_path)
 
 
 if __name__ == '__main__':
-    storage = fetch_point_cloud_storage('test')
+    storage = fetch_point_cloud_storage()
     rgb = storage.get_rgb('000001')
     depth = storage.get_depth('000001')
     print(rgb.shape, depth.dtype, np.max(depth))
